@@ -165,6 +165,8 @@ class F64RoundTests(unittest.TestCase):
                 self.assertEqual(tuple(run_op(op, value)), words(want))
 
     def test_vop3_modifiers(self):
+        # clamp applies; mul:2/mul:4/div:2 do nothing on RDNA2 while f64 denormals are kept (docs/design.md,
+        # "v_add_f64 output modifiers"): trunc(|-2.75|) = 2.0 clamped to 1.0, floor(-(-2.75)) = 2.0 unscaled.
         low, high = words(-2.75)
         text = support.translate_lines("ps_f64_mod", [
             f"v_mov_b32 v0, {low:#x}", f"v_mov_b32 v1, {high:#x}",
@@ -172,7 +174,7 @@ class F64RoundTests(unittest.TestCase):
             "v_floor_f64_e64 v[4:5], -v[0:1] mul:2",
             "exp mrt0 v2, v3, v4, v5 done vm", "s_endpgm",
         ])
-        self.assertEqual(tuple(support.mrt0_words(text)), words(1.0) + words(4.0))
+        self.assertEqual(tuple(support.mrt0_words(text)), words(1.0) + words(2.0))
 
     def test_rejects_bad_operand_forms(self):
         for instruction in ("v_floor_f64 v4, v[0:1]", "v_round_f64 v[4:5], v[0:1]",
