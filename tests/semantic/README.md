@@ -180,6 +180,11 @@ instruction family per file; the list below describes some of them, not every fi
   the four operand words of its header and expects the header's eight words, and checks that every register one of
   its multiply-adds reads comes from `s4..s7`: with three literal operands the f16 one was a compile-time constant,
   which MoltenVK 1.4.2 gets wrong (`docs/testing.md`, Known problems).
+- `test_valu_div_fixup.py` runs hand-written `v_div_fixup_f32` listings through the translator and asserts the
+  pure-integer lowering's op order, classification constants and NaN priority (`NaN(S2)` above `NaN(S1)` above
+  `0/0`, read off the dataflow) on the emitted SPIR-V, then one word per measured rule through
+  `spirv_mini_interp` (TEST-545: it replaces a hand-written Python model of the fixup that never ran the
+  translator, so it passed whatever the translator did).
 - `test_fixtures.py` checks `tests/semantic/fixtures/disasm/*.s` equals what `regen_fixtures.py` makes from
   `runtime/test/shaders/*.asm` (`python tests/semantic/regen_fixtures.py` rewrites them).
 - `test_dpp_eager_subgroup.py` (SHADER-529) checks that no DPP ballot or shuffle is left where SPIRV-Cross
