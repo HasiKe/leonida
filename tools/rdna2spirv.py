@@ -8581,7 +8581,8 @@ class Gen:
                     r = self.tmp()
                     self.emit(f"{r} = OpFAdd %double {x} {y}")
                     if self.round_mode:
-                        # MODE rounds the sum itself; clamp/omod then apply to the rounded value, as on the hardware.
+                        # MODE rounds the sum itself; the mods are applied to the rounded value at the shared site
+                        # below, which passes only `clamp`.
                         m2, mlo, mhi, n2, rd = (self.tmp() for _ in range(5))
                         self.emit(f"{m2} = OpBitcast %v2uint_d {r}")
                         self.emit(f"{mlo} = OpCompositeExtract %uint {m2} 0")
