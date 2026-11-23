@@ -1198,18 +1198,25 @@ struct ChildProxy {
 };
 
 SRWLOCK g_live_child_lock = SRWLOCK_INIT;
-ChildProxy* g_live_children = nullptr;
+constexpr std::size_t kLiveChildBuckets = 256;
+ChildProxy* g_live_children[kLiveChildBuckets]{};
+
+std::size_t live_child_bucket(const void* object) {
+    const auto address = reinterpret_cast<std::uintptr_t>(object);
+    return ((address >> 4) ^ (address >> 12)) & (kLiveChildBuckets - 1);
+}
 
 void register_live_child(ChildProxy* child) {
     AcquireSRWLockExclusive(&g_live_child_lock);
-    child->live_next = g_live_children;
-    g_live_children = child;
+    auto& head = g_live_children[live_child_bucket(child)];
+    child->live_next = head;
+    head = child;
     ReleaseSRWLockExclusive(&g_live_child_lock);
 }
 
 void unregister_live_child(ChildProxy* child) {
     AcquireSRWLockExclusive(&g_live_child_lock);
-    for (auto** at = &g_live_children; *at; at = &(*at)->live_next) {
+    for (auto** at = &g_live_children[live_child_bucket(child)]; *at; at = &(*at)->live_next) {
         if (*at != child) continue;
         *at = child->live_next;
         child->live_next = nullptr;
@@ -1224,7 +1231,7 @@ template <ChildKind K>
 ChildProxy* pin_live_child(const void* candidate) {
     ChildProxy* pinned = nullptr;
     AcquireSRWLockShared(&g_live_child_lock);
-    for (auto* child = g_live_children; child; child = child->live_next) {
+    for (auto* child = g_live_children[live_child_bucket(candidate)]; child; child = child->live_next) {
         if (child != candidate || child->kind != K) continue;
         auto refs = child->refs.load(std::memory_order_relaxed);
         while (refs && refs != (std::numeric_limits<unsigned long>::max)()) {
@@ -1243,7 +1250,7 @@ template <ChildKind K>
 bool is_live_child(const void* candidate) {
     bool found = false;
     AcquireSRWLockShared(&g_live_child_lock);
-    for (const auto* child = g_live_children; child; child = child->live_next) {
+    for (const auto* child = g_live_children[live_child_bucket(candidate)]; child; child = child->live_next) {
         if (child != candidate || child->kind != K) continue;
         found = child->refs.load(std::memory_order_relaxed) != 0;
         break;
@@ -1721,8 +1728,14 @@ IUnknown* proxy_real_object(const void* object) {
     if (!object) return nullptr;
     void* const vtable = *reinterpret_cast<void* const*>(object);
     if (vtable == reinterpret_cast<void*>(get_heap_vtable())) return static_cast<const HeapProxy*>(object)->real;
-    if (is_child_proxy<ChildKind::queue>(object) || is_child_proxy<ChildKind::fence>(object) ||
-        is_child_proxy<ChildKind::allocator>(object))
+    // Native objects take no registry lock or walk. A child-vtable match only selects the one identity lookup;
+    // matching bytes alone still do not establish that the candidate is a live child proxy.
+    if ((vtable == reinterpret_cast<void*>(get_child_vtable<ChildKind::queue>()) &&
+         is_child_proxy<ChildKind::queue>(object)) ||
+        (vtable == reinterpret_cast<void*>(get_child_vtable<ChildKind::fence>()) &&
+         is_child_proxy<ChildKind::fence>(object)) ||
+        (vtable == reinterpret_cast<void*>(get_child_vtable<ChildKind::allocator>()) &&
+         is_child_proxy<ChildKind::allocator>(object)))
         return static_cast<const ChildProxy*>(object)->real;
     if (IUnknown* real = list_real_or_null(object)) return real;
     return nullptr;
