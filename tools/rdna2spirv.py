@@ -5045,6 +5045,13 @@ class Gen:
             self.emit(f"{val} = OpGroupNonUniformShuffle %uint {self.cu(3)} {old} {fi}")
         self.dst(a[0], val)
 
+    LDS_WORDS = {"b32": 1, "b64": 2, "b96": 3, "b128": 4}
+
+    def lds_pair_byte_offsets(self, op, mods):
+        words = self.LDS_WORDS[op.rsplit("_", 1)[1]]
+        unit = 4 * words * (64 if "st64" in op else 1)
+        return tuple(self.mod_int(mods, key, 0) * unit for key in ("offset0", "offset1"))
+
     def lds_op(self, op, a, mods):
         """LDS (GFX10 DS encoding). Addresses are bytes. offset:N is bytes; read2/write2 offset0/offset1 count
         data-size units (x64 for st64). Writes and atomics run only in active lanes; results land in VGPRs through
@@ -5063,7 +5070,6 @@ class Gen:
         self.emit(f"{lbl_do} = OpLabel")
         off = self.mod_int(mods, "offset", 0)
         sc, sem = self.cu(2), self.cu(0)
-        sizes = {"b32": 1, "b64": 2, "b96": 3, "b128": 4}
         if op in ("ds_read_addtid_b32", "ds_write_addtid_b32"):
             if "gds" in mods or not 0 <= off <= 0xFFFF:
                 raise Unsupported(op + " addressing")
@@ -5085,12 +5091,12 @@ class Gen:
                 self.emit(f"OpStore {ptr} {self.src_u(a[0])} Volatile")
         elif op in ("ds_read_b32", "ds_read_b64", "ds_read_b96", "ds_read_b128"):
             addr = self.src_u(a[1])
-            for k in range(sizes[op.rsplit("_", 1)[1]]):
+            for k in range(self.LDS_WORDS[op.rsplit("_", 1)[1]]):
                 v = self.lds_load(addr, off + 4 * k)
                 self.dst({"k": "vgpr", "r": a[0]["r"] + k, "n": 1}, v)
         elif op in ("ds_write_b32", "ds_write_b64", "ds_write_b96", "ds_write_b128"):
             addr = self.src_u(a[0])
-            for k in range(sizes[op.rsplit("_", 1)[1]]):
+            for k in range(self.LDS_WORDS[op.rsplit("_", 1)[1]]):
                 v = self.load_reg("vgpr", a[1]["r"] + k)
                 self.lds_store(addr, off + 4 * k, v)
         elif op in ("ds_read2_b32", "ds_read2st64_b32", "ds_write2_b32", "ds_write2st64_b32",
@@ -5099,8 +5105,7 @@ class Gen:
             # times 64 for st64. A b64 element is two consecutive dwords (low first): read2_b64 fills
             # v[d:d+3], write2_b64 takes two VGPR pairs.
             words = 2 if op.endswith("_b64") else 1
-            unit = 4 * words * (64 if "st64" in op else 1)
-            offs = (self.mod_int(mods, "offset0", 0) * unit, self.mod_int(mods, "offset1", 0) * unit)
+            offs = self.lds_pair_byte_offsets(op, mods)
             if op.startswith("ds_read2"):
                 addr = self.src_u(a[1])
                 vals = []
@@ -14898,11 +14903,11 @@ class Gen:
 
     def gs_ds(self, op, a, mods):
         nreg = self.gs["nreg"]
-        if op in ("ds_read_b32", "ds_read_b64", "ds_read2_b32", "ds_read_b128", "ds_read_b96"):
-            if op == "ds_read2_b32":
-                dws = [self.mod_int(mods, "offset0", 0), self.mod_int(mods, "offset1", 0)]
+        if op in ("ds_read_b32", "ds_read_b64", "ds_read_b96", "ds_read_b128", "ds_read2_b32", "ds_read2st64_b32"):
+            if op in ("ds_read2_b32", "ds_read2st64_b32"):
+                dws = [offset // 4 for offset in self.lds_pair_byte_offsets(op, mods)]
             else:
-                n = {"ds_read_b32": 1, "ds_read_b64": 2, "ds_read_b96": 3, "ds_read_b128": 4}[op]
+                n = self.LDS_WORDS[op.rsplit("_", 1)[1]]
                 base = self.mod_int(mods, "offset", 0)
                 if base % 4:
                     raise Unsupported("gs lds read alignment")
@@ -14911,13 +14916,18 @@ class Gen:
             vtx = self.tmp()
             self.emit(f"{vtx} = OpShiftRightLogical %uint {addr} {self.cu(8)}")
             for k, dw in enumerate(dws):
-                dw %= self.GS_VTX_DW
+                vertex_delta, dw = divmod(dw, self.GS_VTX_DW)
+                vertex = vtx
+                # A 64-dword stride walks the ES/GS input vertices at a fixed component.
+                if op == "ds_read2st64_b32" and vertex_delta:
+                    vertex = self.tmp()
+                    self.emit(f"{vertex} = OpIAdd %uint {vtx} {self.cu(vertex_delta)}")
                 reg, comp = dw // 4, dw % 4
                 regs = {r: sv for r, sv in self.gs["in"]}
                 if reg in regs:
                     var = "%gs_in_pos" if regs[reg] == 1 else f"%gs_in{reg}"
                     pp, v4, c = self.tmp(), self.tmp(), self.tmp()
-                    self.emit(f"{pp} = OpAccessChain %_ptr_Input_v4 {var} {vtx}")
+                    self.emit(f"{pp} = OpAccessChain %_ptr_Input_v4 {var} {vertex}")
                     self.emit(f"{v4} = OpLoad %v4float {pp}")
                     self.emit(f"{c} = OpCompositeExtract %float {v4} {comp}")
                     val = self.tou(c)
@@ -14925,14 +14935,16 @@ class Gen:
                     val = self.cu(0)
                 self.dst({"k": "vgpr", "r": a[0]["r"] + k, "n": 1}, val)
             return
-        if op in ("ds_write_b32", "ds_write2_b32", "ds_write_b64"):
-            if op == "ds_write2_b32":
-                items = [(self.mod_int(mods, "offset0", 0), a[1]), (self.mod_int(mods, "offset1", 0), a[2])]
-            elif op == "ds_write_b64":
-                base = self.mod_int(mods, "offset", 0) // 4
-                items = [(base, {"k": "vgpr", "r": a[1]["r"], "n": 1}), (base + 1, {"k": "vgpr", "r": a[1]["r"] + 1, "n": 1})]
-            else:
+        if op in ("ds_write_b32", "ds_write_b64", "ds_write_b96", "ds_write_b128", "ds_write2_b32", "ds_write2st64_b32"):
+            if op in ("ds_write2_b32", "ds_write2st64_b32"):
+                offsets = self.lds_pair_byte_offsets(op, mods)
+                items = [(offsets[0] // 4, a[1]), (offsets[1] // 4, a[2])]
+            elif op == "ds_write_b32":
                 items = [(self.mod_int(mods, "offset", 0) // 4, a[1])]
+            else:
+                base = self.mod_int(mods, "offset", 0) // 4
+                n = self.LDS_WORDS[op.rsplit("_", 1)[1]]
+                items = [(base + k, {"k": "vgpr", "r": a[1]["r"] + k, "n": 1}) for k in range(n)]
             for dw, src in items:
                 slot, rem = divmod(dw, 4 * nreg)
                 if slot >= self.gs["maxv"]:
