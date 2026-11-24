@@ -1612,14 +1612,9 @@ class FunctionTranslator:
 
     def _maybe_mkflags(self, ins):
         if ins.addr in self.mat:
-            # the stored word needs x86-polarity CF; NZCV still holds arm-polarity for
-            # subtract-kind producers, so normalize C in NZCV before snapshotting.
-            if ins.mnem in SUB_KIND:
-                a = self.asm
-                a.mrs_nzcv(GTMP)
-                a.eor_i(GTMP, GTMP, 0x20000000)
-                a.msr_nzcv(GTMP)
-            kind = 2 if ins.mnem in LOGIC_KIND else 0
+            # rt_mkflags preserves live ARM NZCV (needed by same-block consumers
+            # on arm_path) and converts SUB_KIND borrow polarity when kind == 1.
+            kind = 2 if ins.mnem in LOGIC_KIND else (1 if ins.mnem in SUB_KIND else 0)
             self._mkflags(kind)
 
     def _emit_cmp(self, ins):
@@ -1724,7 +1719,14 @@ class FunctionTranslator:
                 a.mrs_nzcv(T1)
                 a.bfi(T1, T0, 29, 1)
                 a.msr_nzcv(T1)
-        self._maybe_mkflags(ins)
+        if ins.addr in self.mat:
+            # Update only EF_CF (bit 0) of ctx.eflags from ARM NZCV bit 29 without
+            # clobbering SF/ZF/OF/PF/AF via rt_mkflags.
+            a.mrs_nzcv(T0)
+            a.ubfx(T0, T0, 29, 1)
+            a.ldr(T1, CTX_REG, CTX_EFLAGS, size=4)
+            a.bfi(T1, T0, 0, 1)
+            a.str(T1, CTX_REG, CTX_EFLAGS, size=4)
 
     def _emit_adcsbb(self, ins):
         a = self.asm
