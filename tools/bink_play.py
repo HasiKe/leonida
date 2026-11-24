@@ -85,7 +85,12 @@ def load_names(archive, mount, use_cache=True):
     if use_cache:
         fd, name = tempfile.mkstemp(prefix="bink_names.", suffix=".part", dir=cache.parent)
         try:
-            with open(fd, "w", encoding="utf-8", newline="") as f:
+            try:
+                out = open(fd, "w", encoding="utf-8", newline="")
+            except BaseException:
+                os.close(fd)
+                raise
+            with out as f:
                 f.write("# " + key + "\n")
                 w = csv.writer(f, lineterminator="\n")
                 w.writerow(CACHE_FIELDS)
@@ -93,6 +98,10 @@ def load_names(archive, mount, use_cache=True):
                     w.writerow([r["path"], r["offset"], r["width"], r["height"], r["frames"]])
             os.replace(name, cache)
         finally:
+            try:
+                os.chmod(name, 0o600)
+            except OSError:
+                pass
             Path(name).unlink(missing_ok=True)
     return [(r["path"], int(r["offset"]), r["width"], r["height"], r["frames"]) for r in rows]
 
