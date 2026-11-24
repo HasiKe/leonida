@@ -195,6 +195,28 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(trace["bad_lines"], 1)
         self.assertEqual(trace["bad_line_numbers"], [len(STARTUP) + 1])
 
+    def test_json_decoder_limits_do_not_hide_later_events(self):
+        digit_limit = sys.int_info.str_digits_check_threshold
+        self.addCleanup(sys.set_int_max_str_digits, sys.get_int_max_str_digits())
+        sys.set_int_max_str_digits(digit_limit)
+        depth = 10_000
+        records = (
+            ("integer digits", "1" * (digit_limit + 1)),
+            ("nesting", "[" * depth + "0" + "]" * depth),
+        )
+        for decoder_limit, value in records:
+            with self.subTest(decoder_limit=decoder_limit):
+                self.write_lines(self.startup, [
+                    '{"kind":"trace_open","pid":7}',
+                    '{"kind":"fixture","value":' + value + '}',
+                    '{"kind":"exit","code":0}',
+                ])
+                trace = bt.parse_startup(self.startup)
+                self.assertEqual(trace["events"], 2)
+                self.assertEqual(trace["bad_lines"], 1)
+                self.assertEqual(trace["bad_line_numbers"], [2])
+                self.assertEqual(trace["exit"], 0)
+
     def test_crlf_and_non_object_lines_are_counted(self):
         self.write(
             self.startup,
