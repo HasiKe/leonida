@@ -5061,17 +5061,23 @@ class Gen:
                 for k, v in enumerate(vals):         # every load before the first write (vdst may alias vaddr)
                     self.dst({"k": "vgpr", "r": a[0]["r"] + k, "n": 1}, v)
             else:
+                if len(a) != 3:
+                    raise Unsupported(op + " operands")
                 addr = self.src_u(a[0])
                 for k, o in enumerate(offs):
                     data = a[1 + k]
-                    for w in range(words):
-                        if words == 1:
-                            v = self.src_u(data)
-                        elif data["k"] == "vgpr" and data.get("n") == 2:
+                    # Validate both operands. Equal offsets store only DATA0 (RDNA2 ISA §10.4.3).
+                    duplicate = k == 1 and o == offs[0]
+                    if words == 1:
+                        v = self.src_u(data)
+                        if not duplicate:
+                            self.lds_store(addr, o, v)
+                    elif data["k"] != "vgpr" or data.get("n") != 2:
+                        raise Unsupported(op + " data")
+                    elif not duplicate:
+                        for w in range(words):
                             v = self.load_reg("vgpr", data["r"] + w)
-                        else:
-                            raise Unsupported(op + " data")
-                        self.lds_store(addr, o + 4 * w, v)
+                            self.lds_store(addr, o + 4 * w, v)
         elif op in ("ds_read_u16", "ds_read_i16", "ds_read_u8", "ds_read_i8", "ds_read_u16_d16_hi", "ds_read_u16_d16",
                     "ds_read_u8_d16", "ds_read_u8_d16_hi", "ds_read_i8_d16", "ds_read_i8_d16_hi"):
             bits = 16 if "16" in op.split("_")[2] else 8
