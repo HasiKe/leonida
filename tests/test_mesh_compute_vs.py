@@ -91,7 +91,7 @@ class Interface(unittest.TestCase):
         self.assertIn("%ahi_p = OpAccessChain %_ptr_Uniform_uint_tail %pc_tail %c5", asm)
 
     def test_pc_tail_address_dwords_rejects_malformed_values(self):
-        for bad in ([], [4], [4, 5, 6], [-1, 5], [True, 5], ["4", "5"], "45", 4):
+        for bad in ([], [4], [4, 5, 6], [-1, 5], [4, 4], [64, 65], [70000, 70001], [True, 5], ["4", "5"], "45", 4):
             with self.subTest(bad=bad):
                 lay = dict(layout(), pc_tail_address_dwords=bad)
                 with self.assertRaises(ValueError):
