@@ -368,7 +368,7 @@ def _finish(buf, pos, end, ins, start, mnem, opspec, state, addr, opcode_byte):
         elif t == "S":
             ops.append(("seg", reg_field, 0))
         elif t == "Q":
-            v, pos = _read_imm(buf, pos, end, 8, signed=False)
+            v, pos = _read_imm(buf, pos, end, 4 if ins.addrsize else 8, signed=False)
             ops.append(("m", {"base": None, "index": None, "scale": 0, "disp": 0,
                               "rip": False, "size": _size_of(s, opsize, rexw),
                               "seg": ins.seg, "abs": v, "moffs": True}))
@@ -379,8 +379,12 @@ def _finish(buf, pos, end, ins, start, mnem, opspec, state, addr, opcode_byte):
     ins.ops = tuple(ops)
     ins.size = pos - start
     for o in ins.ops:
-        if o[0] == "m" and o[1]["rip"]:
-            o[1]["abs"] = ins.addr + ins.size + o[1]["disp"]
+        if o[0] == "m":
+            if ins.addrsize:
+                o[1]["addrsize"] = 4
+            if o[1]["rip"]:
+                abs_a = ins.addr + ins.size + o[1]["disp"]
+                o[1]["abs"] = abs_a & 0xFFFFFFFF if ins.addrsize else abs_a
     _classify(ins, mnem, opcode_byte & 0xF, state)
     return ins
 
@@ -697,8 +701,12 @@ def _finish_group(buf, pos, end, ins, start, group, opspec, state, addr, opcode_
     ins.ops = tuple(ops)
     ins.size = pos - start
     for o in ins.ops:
-        if o[0] == "m" and o[1]["rip"]:
-            o[1]["abs"] = ins.addr + ins.size + o[1]["disp"]
+        if o[0] == "m":
+            if ins.addrsize:
+                o[1]["addrsize"] = 4
+            if o[1]["rip"]:
+                abs_a = ins.addr + ins.size + o[1]["disp"]
+                o[1]["abs"] = abs_a & 0xFFFFFFFF if ins.addrsize else abs_a
     _classify(ins, mnem, opcode_byte & 0xF, state)
     return ins
 
@@ -1374,41 +1382,37 @@ class FunctionTranslator:
     def _mem_addr(self, m, rd):
         a = self.asm
         disp = m["disp"]
+        sf = 0 if m.get("addrsize") == 4 else 1
         if m["rip"] or m.get("moffs") or (m["base"] is None and m["index"] is None):
-            a.li(rd, (m["abs"] if m["abs"] is not None else disp) & 0xFFFFFFFFFFFFFFFF)
+            v = m["abs"] if m["abs"] is not None else disp
+            a.li(rd, v & (0xFFFFFFFF if not sf else 0xFFFFFFFFFFFFFFFF))
             return
         base, idx = m["base"], m["index"]
         if idx is None:
             gb = GMAP[base]
             if disp == 0:
-                if gb != rd:
-                    a.mov(rd, gb)
+                if not sf or gb != rd:
+                    a.mov(rd, gb, sf=sf)
             elif -256 <= disp <= 255:
-                a.add(rd, gb, disp)
+                a.add(rd, gb, disp, sf=sf)
             elif 0 <= disp < 4096:
-                a.add(rd, gb, disp)
+                a.add(rd, gb, disp, sf=sf)
             elif -4096 < disp < 0:
-                a.sub(rd, gb, -disp)
+                a.sub(rd, gb, -disp, sf=sf)
             else:
-                a.li(rd, disp)
-                a.add_r(rd, rd, gb)
+                a.li(rd, disp if sf else (disp & 0xFFFFFFFF))
+                a.add_r(rd, rd, gb, sf=sf)
             return
         if base is not None:
-            a.add_r(rd, GMAP[base], GMAP[idx], sf=1, shift=0, imm6=m["scale"])
-            if disp:
-                if -4096 < disp < 4096:
-                    a.add(rd, rd, disp)
-                else:
-                    a.li(GTMP, disp)
-                    a.add_r(rd, rd, GTMP)
+            a.add_r(rd, GMAP[base], GMAP[idx], sf=sf, shift=0, imm6=m["scale"])
         else:
-            a.lsl(rd, GMAP[idx], m["scale"])
-            if disp:
-                if -4096 < disp < 4096:
-                    a.add(rd, rd, disp)
-                else:
-                    a.li(GTMP, disp)
-                    a.add_r(rd, rd, GTMP)
+            a.lsl(rd, GMAP[idx], m["scale"], sf=sf)
+        if disp:
+            if -4096 < disp < 4096:
+                a.add(rd, rd, disp, sf=sf)
+            else:
+                a.li(GTMP, disp if sf else (disp & 0xFFFFFFFF))
+                a.add_r(rd, rd, GTMP, sf=sf)
 
     def _stash_res(self, ins, res_reg):
         need = self.needed.get(ins.addr, set())
