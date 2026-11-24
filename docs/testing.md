@@ -523,6 +523,11 @@ fail natively; through the fallback `ps_bary` and `ps_persp_bary` pass. `tools/v
 `run_gpu_tests.py` turn the fallback on by themselves there, with the same `LEONIDA_BARY_FALLBACK` override. RADV and
 other GCN 5 GPUs are not covered: none has been measured.
 
+The same driver on a Raphael iGPU (Ryzen 7000 desktop, PCI 1002:164E, RDNA 2) also reads a wrong third `BaryCoordKHR`
+component in `ps_bary` (0.992 where 0.0039 is expected) under driver 31.0.22044.1 (Vulkan `driverVersion` 2.0.283, compiler
+23.20.44), and passes through `LEONIDA_BARY_FALLBACK=1`. `barycentric_fallback` is true there only up to and including
+driverVersion 2.0.283; newer drivers keep native barycentrics, and `LEONIDA_BARY_FALLBACK=0` turns the fallback off.
+
 ## Macs: 16-bit interpolation without PerVertexKHR
 
 `ps_interp_f16_high` (and `ms_f16_pack`) normally read 16-bit interpolants through `PerVertexKHR` inputs, which
