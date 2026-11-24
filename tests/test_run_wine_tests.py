@@ -594,6 +594,20 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["-p", "-w", "-p", "-k"])
 
+    def test_an_existing_persistent_server_is_warmed_but_not_stopped(self):
+        with mock.patch.object(rwt.KeptServer, "_run", side_effect=[2, 1]) as server, \
+                mock.patch.object(rwt.subprocess, "run") as warm:
+            kept = rwt.KeptServer("wineserver", [sys.executable])
+            with kept:
+                self.assertFalse(kept.started)
+                self.assertIn("used and left running", kept.note)
+        self.assertEqual(server.call_args_list, [mock.call("-p"), mock.call("-w", timeout=15.0)])
+        warm.assert_called_once()
+        self.assertEqual(warm.call_args.args[0], [sys.executable, "wineboot"])
+        self.assertIs(warm.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(warm.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertEqual(warm.call_args.kwargs["timeout"], 120)
+
     def test_no_wineserver_is_one_line_and_the_run_goes_on(self):
         code, out, _ = self.run_main([ctest_entry("ok", self.command("ok.py"))], "--require", "ok")
         self.assertEqual(code, 0)
