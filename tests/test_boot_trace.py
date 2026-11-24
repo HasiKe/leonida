@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -199,19 +200,28 @@ class BootTraceTests(unittest.TestCase):
         digit_limit = sys.int_info.str_digits_check_threshold
         self.addCleanup(sys.set_int_max_str_digits, sys.get_int_max_str_digits())
         sys.set_int_max_str_digits(digit_limit)
-        depth = 10_000
+        nested_record = '{"kind":"fixture","value":[[0]]}'
+        decode = json.loads
+
+        def decode_row(line):
+            # The nesting depth that triggers an error varies across Python builds.
+            if line == nested_record:
+                raise RecursionError("synthetic decoder nesting limit")
+            return decode(line)
+
         records = (
-            ("integer digits", "1" * (digit_limit + 1)),
-            ("nesting", "[" * depth + "0" + "]" * depth),
+            ("integer digits", '{"kind":"fixture","value":' + "1" * (digit_limit + 1) + '}'),
+            ("nesting", nested_record),
         )
-        for decoder_limit, value in records:
+        for decoder_limit, record in records:
             with self.subTest(decoder_limit=decoder_limit):
                 self.write_lines(self.startup, [
                     '{"kind":"trace_open","pid":7}',
-                    '{"kind":"fixture","value":' + value + '}',
+                    record,
                     '{"kind":"exit","code":0}',
                 ])
-                trace = bt.parse_startup(self.startup)
+                with mock.patch.object(bt.json, "loads", side_effect=decode_row):
+                    trace = bt.parse_startup(self.startup)
                 self.assertEqual(trace["events"], 2)
                 self.assertEqual(trace["bad_lines"], 1)
                 self.assertEqual(trace["bad_line_numbers"], [2])
