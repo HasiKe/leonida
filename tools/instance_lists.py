@@ -192,7 +192,6 @@ def prop_list(V, P, blocks, structs, buf, lo, R):
         add(R, "lists_unresolved")
         return
     ib, io, n = ref
-    ib, io, n = ref
     isz = structs.get(PROP_INST, (0x40, {}))[0] or 0x40
     mat = member_or(structs, PROP_INST, "InstMat", 0)
     add(R, "instances", n)
@@ -204,18 +203,19 @@ def prop_list(V, P, blocks, structs, buf, lo, R):
     sqrt, isfinite = math.sqrt, math.isfinite
     for m in _matrices(ib, io, fit, isz, mat):
         # Three row-major rows of four floats; the axes are the columns of the 3x3 part.
-        l0 = sqrt(m[0] * m[0] + m[4] * m[4] + m[8] * m[8])
-        l1 = sqrt(m[1] * m[1] + m[5] * m[5] + m[9] * m[9])
-        l2 = sqrt(m[2] * m[2] + m[6] * m[6] + m[10] * m[10])
+        # Keep the record-by-record sum() rounding at the classification boundaries.
+        l0 = sqrt(sum((m[0] * m[0], m[4] * m[4], m[8] * m[8])))
+        l1 = sqrt(sum((m[1] * m[1], m[5] * m[5], m[9] * m[9])))
+        l2 = sqrt(sum((m[2] * m[2], m[6] * m[6], m[10] * m[10])))
         if not isfinite(l0 + l1 + l2 + m[3] + m[7] + m[11]) or min(l0, l1, l2) <= 1e-6:
             degenerate += 1
             continue
         a = (m[0] / l0, m[4] / l0, m[8] / l0)
         b = (m[1] / l1, m[5] / l1, m[9] / l1)
         c = (m[2] / l2, m[6] / l2, m[10] / l2)
-        dab = abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
-        dac = abs(a[0] * c[0] + a[1] * c[1] + a[2] * c[2])
-        dbc = abs(b[0] * c[0] + b[1] * c[1] + b[2] * c[2])
+        dab = abs(sum((a[0] * b[0], a[1] * b[1], a[2] * b[2])))
+        dac = abs(sum((a[0] * c[0], a[1] * c[1], a[2] * c[2])))
+        dbc = abs(sum((b[0] * c[0], b[1] * c[1], b[2] * c[2])))
         det = (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
                + a[2] * (b[0] * c[1] - b[1] * c[0]))
         ok += 1
@@ -249,7 +249,7 @@ def _matrices(ib, io, fit, isz, mat):
     """The 12 floats of each of the first fit records, read by one C-level pass when records do not overlap."""
     if fit <= 0:
         return ()
-    if isz >= mat + 48:
+    if isz >= mat + 48 and io + fit * isz <= len(ib):
         rec = struct.Struct(f"<{mat}x12f{isz - mat - 48}x")
         return rec.iter_unpack(memoryview(ib)[io:io + fit * isz])
     return (struct.unpack_from("<12f", ib, io + i * isz + mat) for i in range(fit))

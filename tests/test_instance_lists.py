@@ -419,7 +419,9 @@ class ManyInstancesTests(unittest.TestCase):
         structs = {il.PROP_LIST: (0x170, {M["InstanceList"]: (0x90, 0x52), M["BatchAABB"]: (0xA0, 0x05)}),
                    il.PROP_INST: (0x40, {M["InstMat"]: (0x4, 0x50)})}
         data = _random_matrices(rng, 3000, 0x40, 4)
-        for n, cut in ((3000, 0), (3000, 1000), (2, 0)):
+        # The last record has 12 padding bytes after its matrix. Only cutting into
+        # the matrix itself makes that instance incomplete.
+        for n, cut in ((3000, 0), (3000, 1), (3000, 12), (3000, 13), (3000, 1000), (2, 0)):
             with self.subTest(n=n, cut=cut):
                 pl = bytearray(0x170)
                 struct.pack_into("<QH", pl, 0x90, 1, n)
@@ -429,6 +431,18 @@ class ManyInstancesTests(unittest.TestCase):
                 il.prop_list(bytes(pl), buf, [(il.PROP_INST, len(buf), 0x60000000)], structs, bytes(pl), 0, R)
                 R.pop("lists", None), R.pop("lodLevel", None), R.pop("aabb_valid", None)
                 self.assertEqual(R, _oracle_prop(buf, 0, n, 0x40, 4, box))
+
+    def test_prop_handedness_preserves_reference_rounding(self):
+        # Row three is three times row one. Rounding the column lengths differently
+        # can change the sign of the computed determinant at zero.
+        data = struct.pack("<12f", 6, 1, 1, 0, 3 * 2**26, 0, 2, 0, 18, 3, 3, 0)
+        header = struct.pack("<QH", 1, 1)
+        structs = {il.PROP_LIST: (len(header), {M["InstanceList"]: (0, 0x52)}),
+                   il.PROP_INST: (48, {})}
+        counts = {}
+        il.prop_list(header, data, [(il.PROP_INST, len(data), 0x60000000)], structs, header, 0, counts)
+        reference = _oracle_prop(data, 0, 1, 48, 0, None)
+        self.assertEqual(counts["matrix_right_handed"], reference["matrix_right_handed"])
 
     def test_a_full_grass_list_is_read_much_faster_than_record_by_record(self):
         rng = random.Random(3)
