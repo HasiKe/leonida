@@ -1811,11 +1811,23 @@ class FunctionTranslator:
         m = ins.mnem
         if m == "push":
             op = ins.ops[0]
-            self._load(ins, op, T0, as_size=8)
-            a.str_pre(T0, rsp, -8)
+            sz = 2 if (ins.opsize and not ins.rexw) else 8
+            self._load(ins, op, T0, as_size=sz)
+            a.str_pre(T0, rsp, -sz, size=sz)
         elif m == "pop":
-            a.ldr_post(T0, rsp, 8)
-            self._store(ins, ins.ops[0], T0)
+            op = ins.ops[0]
+            sz = 2 if (ins.opsize and not ins.rexw) else 8
+            a.ldr_post(T0, rsp, sz, size=sz)
+            if sz == 2:
+                if op[0] == "r":
+                    a.bfi(GMAP[op[1]], T0, 0, 16)
+                elif op[0] == "m":
+                    self._mem_addr(op[1], ADDR_T)
+                    a.str(T0, ADDR_T, 0, size=2)
+                else:
+                    raise UnhandledInsn(ins, f"pop16 {op}")
+            else:
+                self._store(ins, op, T0)
         elif m == "pushf":
             self._mkflags(0)
             a.ldur(T0, CTX_REG, CTX_EFLAGS, size=8)
