@@ -1161,6 +1161,40 @@ class TestSaveVerifyCache(unittest.TestCase):
             self.assertEqual(f.read(), manifest)
         self.assertEqual(len(mv.load_cache(self.cache)), 1)
 
+    def test_posix_mode_is_applied_before_publication(self) -> None:
+        real_replace = os.replace
+        def publish(source, destination):
+            mode.assert_called_once_with(self.cache)
+            chmod.assert_called_once_with(source, 0o640)
+            real_replace(source, destination)
+
+        with patch.object(mv.os, "name", "posix"), \
+                patch.object(mv, "published_mode", return_value=0o640, create=True) as mode, \
+                patch.object(mv.os, "chmod") as chmod, \
+                patch.object(mv.os, "replace", side_effect=publish):
+            mv.save_cache(self.cache, self.entries)
+        self.assertEqual(mv.load_cache(self.cache), self.entries)
+
+    def test_mode_error_preserves_cache_and_removes_staging(self) -> None:
+        for operation in ("mode", "chmod"):
+            with self.subTest(operation=operation):
+                with patch.object(mv.os, "name", "posix"), \
+                        patch.object(mv, "published_mode", return_value=0o640, create=True) as mode, \
+                        patch.object(mv.os, "chmod") as chmod:
+                    (mode if operation == "mode" else chmod).side_effect = OSError("mode failed")
+                    with self.assertRaisesRegex(OSError, "mode failed"):
+                        mv.save_cache(self.cache, self.entries)
+                self.assert_files_preserved()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_permissions_of_existing_and_new_caches(self) -> None:
+        os.chmod(self.cache, 0o640)
+        mv.save_cache(self.cache, self.entries)
+        self.assertEqual(os.stat(self.cache).st_mode & 0o777, 0o640)
+        os.unlink(self.cache)
+        mv.save_cache(self.cache, self.entries)
+        self.assertEqual(os.stat(self.cache).st_mode & 0o777, os.stat(self.neighbor).st_mode & 0o777)
+
 
 if __name__ == "__main__":
     unittest.main()

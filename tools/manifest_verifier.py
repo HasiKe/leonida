@@ -30,6 +30,7 @@ import time
 from typing import Callable, Optional, TextIO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from file_mode import published_mode  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
 
 CHUNK = 8 * 1024 * 1024
@@ -158,6 +159,8 @@ def save_cache(path: str, entries: dict[str, dict]) -> None:
         ) as f:
             tmp = f.name
             json.dump({"version": CACHE_VERSION, "files": dict(sorted(entries.items()))}, f, indent=1)
+        if os.name != "nt":
+            os.chmod(tmp, published_mode(path))  # do not publish NamedTemporaryFile's private 0600 mode
         os.replace(tmp, path)
     except BaseException:
         if tmp is not None:
