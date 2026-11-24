@@ -457,6 +457,42 @@ void test_rejections(const fs::path& dll, const fs::path& temp_dir) {
     check(good.base != nullptr && loader.modules().size() == 1, "a valid image still loads after the rejected ones");
 }
 
+void test_read_error(const fs::path& dll, const fs::path& temp_dir) {
+    // The unlocked prefix holds a complete PE. A reader that mistakes an I/O error for EOF can map it.
+    constexpr DWORD block_size = 64 * 1024;
+    auto bytes = read_file(dll);
+    const auto tail = ((bytes.size() + block_size - 1) / block_size) * block_size;
+    bytes.resize(tail + block_size + 17);
+    const fs::path path = temp_dir / "locked_tail.dll";
+    write_file(path, bytes.data(), bytes.size());
+
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    check(file != INVALID_HANDLE_VALUE, "the read-error fixture opens for locking");
+    if (file == INVALID_HANDLE_VALUE) return;
+    OVERLAPPED lock{};
+    lock.Offset = static_cast<DWORD>(tail);
+    const bool locked = LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, block_size, 0, &lock);
+    check(locked, "the read-error fixture has an exclusively locked tail");
+    if (!locked) {
+        CloseHandle(file);
+        return;
+    }
+
+    rt::Loader loader(temp_dir);
+    bool read_error = false;
+    try {
+        loader.load(path);
+    } catch (const std::runtime_error& error) {
+        read_error = std::string(error.what()).find("cannot read ") != std::string::npos;
+    }
+    check(UnlockFileEx(file, 0, block_size, 0, &lock), "the fixture tail unlocks");
+    CloseHandle(file);
+    check(read_error, "a failed PE read after a valid prefix reports an I/O error");
+    check(loader.modules().empty(), "a partial PE read leaves no module behind");
+    check(loader.load(path).base != nullptr, "the same PE loads when the complete file can be read");
+}
+
 // The image's .pdata as the file declares it.
 const IMAGE_DATA_DIRECTORY& exception_directory(const rt::Module& m) {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m.base);
@@ -713,6 +749,7 @@ int main(int argc, char** argv) {
         test_recursive_exe(exe, dll);
         test_forced_relocation(dll);
         test_rejections(dll, temp.path);
+        test_read_error(dll, temp.path);
         test_unwind(dll);
         test_inherited_reservation();
         test_optional_package();
