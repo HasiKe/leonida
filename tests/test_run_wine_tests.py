@@ -493,6 +493,60 @@ class DriveMapTest(unittest.TestCase):
                 self.assertIn("[PASS] compiled_in_path", out.getvalue())
                 self.assertFalse(os.path.lexists(self.link))
 
+    def test_simultaneous_runners_cannot_borrow_a_temporary_drive(self):
+        probe = self.root / "shared_prefix_probe.py"
+        probe.write_text(
+            "import os, time\nfrom pathlib import Path\n"
+            "prefix = Path(os.environ['WINEPREFIX'])\n"
+            "mapped = prefix / 'dosdevices' / 'd:' / 'win' / 'root' / 'runtime/build/generated/cs.spv'\n"
+            "assert mapped.read_text(encoding='utf-8') == 'spirv'\n"
+            "if os.environ.get('HOLD_PREFIX') == '1':\n"
+            "    (prefix / 'ready').touch()\n"
+            "    deadline = time.monotonic() + 15\n"
+            "    while not (prefix / 'release').exists():\n"
+            "        if time.monotonic() > deadline: raise TimeoutError('waiting for release')\n"
+            "        time.sleep(0.01)\n"
+            "    assert mapped.read_text(encoding='utf-8') == 'spirv'\n",
+            encoding="utf-8", newline="\n",
+        )
+        listing = self.root / "shared_prefix.json"
+        listing.write_text(json.dumps({"tests": [ctest_entry("mapping", [f"{WINDOWS_ROOT}/{probe.name}"])]}),
+                           encoding="utf-8", newline="\n")
+        command = [sys.executable, "-I", str(SCRIPTS / "run_wine_tests.py"), "--tests", str(listing),
+                   "--windows-root", WINDOWS_ROOT, "--root", str(self.root), "--wine", sys.executable,
+                   "--require", "mapping", "--timeout", "18"]
+        # Python is passed by absolute path. An empty PATH prevents looking up the machine's wineserver.
+        env = dict(os.environ, PATH="", WINESERVER="", WINEPREFIX=str(self.prefix), HOLD_PREFIX="1")
+        alias = self.prefix.with_name("same-prefix")
+        alias.symlink_to(self.prefix, target_is_directory=True)
+        other = self.prefix.with_name("other-prefix")
+        (other / "dosdevices").mkdir(parents=True)
+
+        def run(prefix):
+            return subprocess.run(command, env=dict(env, WINEPREFIX=str(prefix), HOLD_PREFIX="0"),
+                                  capture_output=True, text=True, timeout=8)
+
+        with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as owner:
+            try:
+                deadline = time.monotonic() + 5
+                while not (self.prefix / "ready").exists() and owner.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue((self.prefix / "ready").exists(), "owner never acquired the temporary mapping")
+                busy = run(alias)
+                self.assertEqual(busy.returncode, 2, busy.stdout + busy.stderr)
+                self.assertIn("already running", busy.stderr)
+                self.assertTrue(self.link.is_symlink())
+                independent = run(other)
+                self.assertEqual(independent.returncode, 0, independent.stdout + independent.stderr)
+            finally:
+                (self.prefix / "release").touch()
+                output, _ = owner.communicate(timeout=8)
+            self.assertEqual(owner.returncode, 0, output)
+        self.assertFalse(os.path.lexists(self.link))
+        retry = run(alias)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertFalse(os.path.lexists(self.link))
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
