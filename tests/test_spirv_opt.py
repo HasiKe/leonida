@@ -568,7 +568,7 @@ class SpirvOptTests(unittest.TestCase):
 
     def test_mixed_signedness_folding_never_produces_type_mismatch(self):
         # SPIR-V allows signed (%int) and unsigned (%uint) operands in integer arithmetic,
-        # bitwise, shift, and OpBitFieldUExtract instructions whose Result Type is %uint.
+        # bitwise, and shift instructions whose Result Type is %uint.
         # Folding must never replace a %uint result with an %int SSA ID (or vice versa),
         # while constant zero/all-ones results must resolve to the Result Type's constant.
         spv = "\n".join([
@@ -595,7 +595,6 @@ class SpirvOptTests(unittest.TestCase):
             "       %out0 = OpVariable %ptr_out_v4 Output",
             "       %out1 = OpVariable %ptr_out_v4 Output",
             "         %u0 = OpConstant %uint 0",
-            "        %u32 = OpConstant %uint 32",
             "       %umax = OpConstant %uint 4294967295",
             "         %i0 = OpConstant %int 0",
             "        %im1 = OpConstant %int -1",
@@ -605,13 +604,13 @@ class SpirvOptTests(unittest.TestCase):
             "          %u = OpLoad %uint %in_u",
             "      %u_add = OpIAdd %uint %s %u0",
             "      %u_and = OpBitwiseAnd %uint %s %s",
-            "      %u_bfe = OpBitFieldUExtract %uint %s %u0 %u32",
+            "      %u_shl = OpShiftLeftLogical %uint %s %u0",
             "     %u_same = OpIAdd %uint %u %u0",
             "     %u_mul0 = OpIMul %uint %u %i0",
             "     %u_and0 = OpBitwiseAnd %uint %u %i0",
             "     %u_orm1 = OpBitwiseOr %uint %u %im1",
             "     %u_shl0 = OpShiftLeftLogical %uint %i0 %u",
-            "       %vec0 = OpCompositeConstruct %v4uint %u_add %u_and %u_bfe %u_same",
+            "       %vec0 = OpCompositeConstruct %v4uint %u_add %u_and %u_shl %u_same",
             "       %vec1 = OpCompositeConstruct %v4uint %u_mul0 %u_and0 %u_orm1 %u_shl0",
             "               OpStore %out0 %vec0",
             "               OpStore %out1 %vec1",
@@ -624,10 +623,10 @@ class SpirvOptTests(unittest.TestCase):
         # Mixed-type identity ops must NOT alias %uint results to %s (%int).
         self.assertIn("%u_add = OpIAdd %uint %s %u0", opt)
         self.assertIn("%u_and = OpBitwiseAnd %uint %s %s", opt)
-        self.assertIn("%u_bfe = OpBitFieldUExtract %uint %s %u0 %u32", opt)
+        self.assertIn("%u_shl = OpShiftLeftLogical %uint %s %u0", opt)
         # Same-type identity still folds (%u_same -> %u).
         self.assertNotIn("%u_same = OpIAdd", opt)
-        self.assertIn("OpCompositeConstruct %v4uint %u_add %u_and %u_bfe %u", opt)
+        self.assertIn("OpCompositeConstruct %v4uint %u_add %u_and %u_shl %u", opt)
         # Mixed-type absorbing constants fold to the %uint constants (%u0 / %umax), never %i0 / %im1.
         self.assertIn("OpCompositeConstruct %v4uint %u0 %u0 %umax %u0", opt)
 
