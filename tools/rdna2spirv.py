@@ -17823,8 +17823,8 @@ def fspx_wave_size(path, name):
     return None if not isinstance(wave32, bool) else (32 if wave32 else 64)
 
 
-def drop_final_halts(insns):
-    """Remove the s_sethalt instructions that change nothing a translated wave can see.
+def lower_final_halts(insns):
+    """Lower supported s_sethalt forms in place in the instruction stream, preserving their PCs.
 
     s_sethalt sets the wave's HALT bit to SIMM16[0] (RDNA2 ISA, SOPP): 1 stops issuing instructions until a debugger
     or the host clears it, 0 lets it run. Nothing clears it in a translated dispatch, so a halt right before
@@ -17842,8 +17842,11 @@ def drop_final_halts(insns):
         if not isinstance(value, int):
             raise Unsupported("s_sethalt without an immediate")
         nxt = insns[k + 1]["op"] if k + 1 < len(insns) else None
-        if value & 1 and nxt != "s_endpgm":
+        halts = value & 1
+        if halts and nxt != "s_endpgm":
             raise Unsupported("s_sethalt 1 before more code")
+        # A branch can target this PC, and the PC can also be its fall-through block's leader.
+        out.append({**ins, "op": "s_endpgm" if halts else "s_nop", "args": [], "mods": ""})
     return out
 
 
@@ -17933,7 +17936,7 @@ def translate(path):
             raise Unsupported("reachable instruction with normalized encoding")
     else:
         check_printed_encodings(path, info)
-    insns = drop_final_halts(insns)
+    insns = lower_final_halts(insns)
     g = Gen(stage, hoist_reg_ptrs=True, cache_active=True)
     g.vcc_scalar_pointer = any(i["op"].startswith("s_load_dword") and len(i["args"]) >= 2 and
                                i["args"][1].get("t") == "vcc" for i in insns)

@@ -10,6 +10,7 @@ import pytest
 
 import rdna2spirv
 from listing import EMPTY_DXBC
+from semantic.test_loop_ballot_barrier import VSHARP, _translate_cs, run_compute_workgroup
 
 
 def translate_cs(tmp_path, body, name="cs_sethalt"):
@@ -48,3 +49,19 @@ def test_resume_is_a_no_op(tmp_path):
 def test_halt_before_more_code_is_refused(tmp_path):
     with pytest.raises(rdna2spirv.Unsupported, match="s_sethalt 1 before more code"):
         translate_cs(tmp_path, "s_sethalt 1\n" + STORE + "s_endpgm")
+
+
+@pytest.mark.parametrize("structured", [True, False])
+@pytest.mark.parametrize("halt", [0, 1])
+@pytest.mark.parametrize("target", [False, True])
+def test_halt_keeps_branch_destination(structured, halt, target):
+    condition = "s_cbranch_scc0 stopped\ns_branch ok" if target else "s_cbranch_scc1 ok"
+    store = "v_lshlrev_b32_e32 v2, 2, v0\nv_mov_b32 v1, 0x5555\nbuffer_store_dword v1, v2, s[0:3], 0 offen\n"
+    stopped = "s_endpgm\n" if halt else store.replace("0x5555", "0x7777") + "s_endpgm\n"
+    program = f"s_cmp_eq_u32 s4, 0\n{condition}\nstopped:\ns_sethalt {halt}\n{stopped}ok:\n{store}s_endpgm"
+    asm, _ = _translate_cs("cs_halt_branch", [line for line in program.splitlines() if line], structured=structured)
+
+    def run(flag):
+        return run_compute_workgroup(asm, 64, 64, push_constants=[*VSHARP[:4], flag])
+    assert run(0) == {4 * lane: 0x5555 for lane in range(64)}
+    assert run(1) == ({} if halt else {4 * lane: 0x7777 for lane in range(64)})
