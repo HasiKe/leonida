@@ -123,8 +123,10 @@ def doc_notes(path: str, rel: str) -> list[dict]:
             if curr_stripped.startswith(("#", "|")):
                 break
             curr_indent = len(curr) - len(curr_stripped)
-            if LIST_ITEM.match(curr_stripped) and (not is_list or curr_indent <= base_indent):
-                break
+            if LIST_ITEM.match(curr_stripped):
+                curr_body = LIST_ITEM.sub("", curr_stripped)
+                if not is_list or curr_indent <= base_indent or DOC_MARK.match(curr_body):
+                    break
             end += 1
         parts = [LIST_ITEM.sub("", lines[i].strip())]
         fence = False

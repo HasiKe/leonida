@@ -150,6 +150,19 @@ class ExeChecklist(unittest.TestCase):
         self.assertEqual(notes[2]["text"], "parent note + nested plus continuation 1. nested ordered continuation")
         self.assertEqual(notes[3]["text"], "prose note 2024. the year it occurred + 5 cases passed.")
 
+    def test_doc_notes_nested_item_with_own_marker_stops_continuation(self):
+        sample = """# Nested note with own marker
+- **VERIFY:** parent note
+  - **VERIFY:** child note
+- next item.
+"""
+        path = os.path.join(self.root, "docs", "nested_marker.md")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(sample)
+        notes = ec.doc_notes(path, "docs/nested_marker.md")
+        self.assertEqual([(n["line"], n["kind"], n["text"]) for n in notes],
+                         [(2, "VERIFY", "parent note"), (3, "VERIFY", "child note")])
+
     def test_a_marker_inside_a_sentence_or_a_table_row_is_prose(self):
         with open(os.path.join(self.root, "docs", "demo.md"), "a", encoding="utf-8", newline="\n") as f:
             f.write("| `v_demo` | written without the console (**Assumption**: not a note) |\n"
