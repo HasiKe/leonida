@@ -2639,6 +2639,8 @@ def require_translated_shaders(work: str) -> str:
     except (OSError, ValueError) as e:
         fail(f"The translated shader index {index} is unreadable ({getattr(e, 'strerror', None) or e}): "
              "run the shaders stage again.")
+    if not isinstance(translated, dict):
+        fail(f"The translated shader index {index} must contain a JSON object. Run the shaders stage again.")
     if not translated:
         # A build from before the shaders stage refused an empty merge can carry this marker.
         fail(f"The translated shader index {index} is empty, so there is nothing to check. Run the shaders stage again.")
