@@ -499,6 +499,15 @@ class OracleTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_image(b"", self.manifest)
 
+    def test_rejects_nonfinite_channels_outside_the_probes(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                raw = bytearray(self.image())
+                # The red channel of covered pixel (1, 1) is outside the clear and UV probes.
+                struct.pack_into("<f", raw, (self.manifest["width"] + 1) * 16, value)
+                with self.assertRaisesRegex(AssertionError, "non-finite channel"):
+                    check_image(raw, self.manifest)
+
 
 class ProbeCoordinateTests(unittest.TestCase):
     rgba = (0.25, 0.75, 0.0, 1.0)
