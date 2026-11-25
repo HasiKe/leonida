@@ -494,6 +494,39 @@ def _mesh_report(gltf: dict, index: int, mesh: dict) -> dict:
     }
 
 
+def _skin_report(gltf: dict, index: int, skin: dict) -> dict:
+    joints = skin.get("joints")
+    joint_count = len(joints) if isinstance(joints, list) else None
+    report = {"index": index, "name": _text(skin.get("name")), "joint_count": joint_count}
+    issues = []
+    if not joint_count:
+        issues.append("joints must be a non-empty array")
+    seen = set()
+    for slot, joint in enumerate(_array(joints)):
+        if _entry(gltf, "nodes", joint) is None:
+            issues.append(f"joints[{slot}] does not reference a node")
+        elif joint in seen:
+            issues.append(f"joints[{slot}] repeats node {joint}")
+        else:
+            seen.add(joint)
+    if "skeleton" in skin and _entry(gltf, "nodes", skin["skeleton"]) is None:
+        issues.append("skeleton does not reference a node")
+    if "inverseBindMatrices" in skin:
+        accessor_index = skin["inverseBindMatrices"]
+        accessor = _accessor(gltf, accessor_index)
+        if accessor is None:
+            issues.append("inverseBindMatrices does not reference an accessor")
+        else:
+            if accessor.get("type") != "MAT4":
+                issues.append("inverseBindMatrices accessor must have type MAT4")
+            count = _accessor_count(gltf, accessor_index)
+            if joint_count and (count is None or count < joint_count):
+                issues.append(f"inverseBindMatrices needs at least {joint_count} matrices")
+    if issues:
+        report["issues"] = issues
+    return report
+
+
 def build_report(glb: dict, file_bytes: int) -> dict:
     """Turn the parsed GLB JSON into the inspection report."""
     gltf = glb["json"]
@@ -504,16 +537,8 @@ def build_report(glb: dict, file_bytes: int) -> dict:
     materials = [_material_report(gltf, i, material)
                   for i, material in enumerate(_array(gltf.get("materials")))
                   if isinstance(material, dict)]
-    skins = []
-    for i, skin in enumerate(_array(gltf.get("skins"))):
-        if not isinstance(skin, dict):
-            continue
-        joints = skin.get("joints")
-        skins.append({
-            "index": i,
-            "name": _text(skin.get("name")),
-            "joint_count": len(joints) if isinstance(joints, list) else None,
-        })
+    skins = [_skin_report(gltf, i, skin) for i, skin in enumerate(_array(gltf.get("skins")))
+             if isinstance(skin, dict)]
     animations = [_animation_report(gltf, i, animation)
                   for i, animation in enumerate(_array(gltf.get("animations")))
                   if isinstance(animation, dict)]
@@ -637,6 +662,8 @@ def format_report(report: dict) -> str:
         lines.append("  (none)")
     for skin in report["skins"]:
         lines.append(f"  [{skin['index']}] name={_show(skin['name'])} joints={_show(skin['joint_count'])}")
+        for issue in skin.get("issues", []):
+            lines.append(f"    issue: {issue}")
 
     lines.append("animations:")
     if not report["animations"]:

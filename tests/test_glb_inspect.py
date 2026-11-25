@@ -246,6 +246,28 @@ class GlbInspectTests(unittest.TestCase):
             self.assertEqual(report["position_bbox"], {"min": [0, 0, 0], "max": [1, 1, 0]})
             self.assertTrue(report["position_bbox_complete"])
 
+    def test_skin_reference_diagnostics(self):
+        doc = skinned_gltf()
+        doc["skins"] = [
+            {"joints": [1, 1, False, {}, 9], "skeleton": 99, "inverseBindMatrices": 0},
+            {"inverseBindMatrices": False},
+            {"joints": [1, 2], "skeleton": 0, "inverseBindMatrices": 4},
+        ]
+        doc["accessors"].append({"type": "MAT4", "componentType": 5126, "count": 3})
+        data = glb(doc)
+        report = glb_inspect.build_report(glb_inspect.parse_glb(data), len(data))
+        first, second, valid = report["skins"]
+        self.assertEqual(first["issues"], [
+            "joints[1] repeats node 1", "joints[2] does not reference a node",
+            "joints[3] does not reference a node", "joints[4] does not reference a node",
+            "skeleton does not reference a node", "inverseBindMatrices accessor must have type MAT4",
+            "inverseBindMatrices needs at least 5 matrices",
+        ])
+        self.assertEqual(second["issues"], ["joints must be a non-empty array",
+                                            "inverseBindMatrices does not reference an accessor"])
+        self.assertNotIn("issues", valid)
+        self.assertIn("issue: joints[1] repeats node 1", glb_inspect.format_report(report))
+
     def test_skinned_mesh_and_joint_count(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "skinned.glb")
