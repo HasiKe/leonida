@@ -51,9 +51,8 @@ def fit_slices(pools):
                             blocks = min(2048, size // 16)
                             if d["depth"] == 1:
                                 # In a packed tail the stream starts with other mips or padding.
-                                # The usual 2D fit visits only the first 256 physical blocks.
                                 first = start + calib.tiled_offset(layout, mip, 0, 0) - virt
-                                if not 256 * 16 <= first < blocks * 16:
+                                if not 0 <= first < blocks * 16:
                                     continue
                             chunks.append((size, offset, packed, virt - start, blocks))
                         if not chunks:
