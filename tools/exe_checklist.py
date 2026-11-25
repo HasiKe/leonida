@@ -83,6 +83,34 @@ def code_notes(path: str, rel: str) -> list[dict]:
     return notes
 
 
+def closed_code_fences(lines: list[str]) -> set[int]:
+    """Line indices that belong to closed fenced code blocks (``` or ~~~). Unclosed fences do not hide later notes."""
+    fenced = set()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].lstrip()
+        indent = len(lines[i]) - len(stripped)
+        if indent <= 3:
+            m = re.match(r"^(`{3,}|~{3,})", stripped)
+            if m:
+                char = m.group(1)[0]
+                length = len(m.group(1))
+                close_idx = None
+                for j in range(i + 1, len(lines)):
+                    c_stripped = lines[j].lstrip()
+                    c_indent = len(lines[j]) - len(c_stripped)
+                    if c_indent <= 3 and re.match(rf"^{char}{{{length},}}\s*$", c_stripped):
+                        close_idx = j
+                        break
+                if close_idx is not None:
+                    for k in range(i, close_idx + 1):
+                        fenced.add(k)
+                    i = close_idx + 1
+                    continue
+        i += 1
+    return fenced
+
+
 def doc_notes(path: str, rel: str) -> list[dict]:
     """Each note whose bold marker starts its line (after the indentation and an optional list marker), from the line
     it starts on to the next blank line or item. A marker further into a sentence (`... work (**Assumption**);`) or a
@@ -90,13 +118,12 @@ def doc_notes(path: str, rel: str) -> list[dict]:
     with open(path, encoding="utf-8", errors="replace") as f:
         lines = f.read().split("\n")
     notes = []
-    in_fence = False
+    fenced = closed_code_fences(lines)
     for i, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
+        if i in fenced:
             continue
-        if in_fence or stripped.startswith("|"):
+        stripped = line.lstrip()
+        if stripped.startswith("|"):
             continue
         body = LIST_ITEM.sub("", stripped)
         m = DOC_MARK.match(body)
@@ -107,17 +134,12 @@ def doc_notes(path: str, rel: str) -> list[dict]:
         base_indent = len(line) - len(stripped)
         is_list = bool(LIST_ITEM.match(stripped))
         end = i + 1
-        fence = False
         while end < len(lines):
+            if end in fenced:
+                end += 1
+                continue
             curr = lines[end]
             curr_stripped = curr.lstrip()
-            if curr_stripped.startswith("```"):
-                fence = not fence
-                end += 1
-                continue
-            if fence:
-                end += 1
-                continue
             if not curr.strip():
                 break
             if curr_stripped.startswith(("#", "|")):
@@ -129,13 +151,11 @@ def doc_notes(path: str, rel: str) -> list[dict]:
                     break
             end += 1
         parts = [LIST_ITEM.sub("", lines[i].strip())]
-        fence = False
-        for l in lines[i + 1:end]:
-            l_str = l.strip()
-            if l_str.startswith("```"):
-                fence = not fence
+        for l_idx in range(i + 1, end):
+            if l_idx in fenced:
                 continue
-            if not fence and l_str:
+            l_str = lines[l_idx].strip()
+            if l_str:
                 parts.append(l_str)
         text = " ".join(p for p in parts if p)
         notes.append({"file": rel, "line": i + 1, "kind": m.group(1).upper(), "text": without_marker(text)})

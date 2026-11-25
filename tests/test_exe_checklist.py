@@ -163,6 +163,34 @@ class ExeChecklist(unittest.TestCase):
         self.assertEqual([(n["line"], n["kind"], n["text"]) for n in notes],
                          [(2, "VERIFY", "parent note"), (3, "VERIFY", "child note")])
 
+    def test_doc_notes_tilde_fences_are_recognised(self):
+        sample = """# Tilde fences
+- **VERIFY:** before tilde fence
+~~~
+- **VERIFY:** inside tilde fence
+~~~
+- **VERIFY:** after tilde fence
+"""
+        path = os.path.join(self.root, "docs", "tilde_fence.md")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(sample)
+        notes = ec.doc_notes(path, "docs/tilde_fence.md")
+        self.assertEqual([(n["line"], n["kind"], n["text"]) for n in notes],
+                         [(2, "VERIFY", "before tilde fence"), (6, "VERIFY", "after tilde fence")])
+
+    def test_doc_notes_unclosed_fence_does_not_hide_later_notes(self):
+        sample = """# Unclosed fence
+```python
+x = 1
+- **VERIFY:** note after unclosed fence
+"""
+        path = os.path.join(self.root, "docs", "unclosed_fence.md")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(sample)
+        notes = ec.doc_notes(path, "docs/unclosed_fence.md")
+        self.assertEqual([(n["line"], n["kind"], n["text"]) for n in notes],
+                         [(4, "VERIFY", "note after unclosed fence")])
+
     def test_a_marker_inside_a_sentence_or_a_table_row_is_prose(self):
         with open(os.path.join(self.root, "docs", "demo.md"), "a", encoding="utf-8", newline="\n") as f:
             f.write("| `v_demo` | written without the console (**Assumption**: not a note) |\n"
