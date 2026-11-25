@@ -60,6 +60,7 @@
 #include "../src/spirv_f16_halves.h"
 #include "../src/spirv_stores.h"
 #include "../src/title_va_alias.h"
+#include "../src/console_heap_vsharp_slots.h"
 #include "../src/title_window_plan.h"
 #include "../src/vulkan_present.h"
 #include "../src/vulkan_device_filter.h"
@@ -1422,7 +1423,7 @@ bool startup_cache_checkpoints_enabled() {
 
 // Writes the session cache at a startup checkpoint or during device teardown. The size cap applies to either write.
 void save_session_pipeline_cache(const leonida::VulkanDeviceFunctions& vk, VkDevice device, VkPipelineCache cache,
-                                 bool checkpoint = false) {
+                                 bool checkpoint = false, const char* op = nullptr) {
     if (!cache || !vk.vkGetPipelineCacheData) return;
     auto limit = pipeline_cache_save_limit();
     // The output is an opaque Vulkan blob. A prefix is not an incremental cache.
@@ -1453,7 +1454,7 @@ void save_session_pipeline_cache(const leonida::VulkanDeviceFunctions& vk, VkDev
                     written <= size && staging.publish(path, written);
     if (trace_pipeline_compile())
         std::fprintf(stderr, "[rt] pipeline-cache op=%s bytes=%zu query_us=%lld fill_us=%lld publish_us=%lld ok=%d result=%d\n",
-                     checkpoint ? "checkpoint" : "teardown", written, queried-start, filled-queried,
+                     op ? op : checkpoint ? "checkpoint" : "teardown", written, queried-start, filled-queried,
                      compile_us()-filled, int(ok), int(result));
     if (ok) std::fprintf(stderr, "[rt] d3d12: wrote %zu bytes to pipeline_cache.session.bin\n", written);
     else std::fprintf(stderr, "[rt] d3d12: pipeline cache snapshot incomplete (%d); previous session retained\n", int(result));
@@ -2199,6 +2200,14 @@ struct DeviceState {
     void title_texture_mapped(const void* resource, std::uint64_t address);
     void title_texture_unmapped(const void* resource, std::uint64_t address);  // the title wrote texels
     void title_texture_gone(const void* resource, std::uint64_t address);
+    // Textures destroyed while their thread held title_texture_mutex (inside the registry, t_in_title_textures): a
+    // descriptor it overwrote held the last reference. Their GPU placement is removed at once; title_texture_gone
+    // cannot take the registry mutex again there (MSVC's
+    // std::mutex throws resource_deadlock_would_occur, which Wine's msvcp140 aborts on), so their entries only stop
+    // naming the resource and are removed by drain_titles_gone once the mutex is free. Under title_texture_mutex.
+    std::vector<std::pair<const void*, std::uint64_t>> titles_gone;
+    std::atomic<bool> titles_gone_pending{false};
+    void drain_titles_gone();
 
     // Windows of the title's own memory in the GPU address arena (src/title_va_alias.h, docs/d3d12_vulkan.md
     // section 3.3 "Title-chosen addresses"): a root view or buffer V# that names the title's memory outside any
@@ -3207,6 +3216,7 @@ struct DeviceState {
         std::vector<std::uint8_t> mirror;  // the title's bytes as the tracker last copied them
         std::vector<std::uint8_t> made;    // the title's bytes each arena slot was last made from
         std::vector<std::uint8_t> retry;   // per slot: not settled yet (fix_console_slot), in `retries`
+        leonida::ConsoleHeapVsharpSlots live_vsharps;  // slots whose GPU copy holds a live buffer V#
         std::vector<std::uint32_t> retries;
         std::set<std::uint32_t> empty_slots;
         std::uint32_t next_empty = 0;
@@ -3286,20 +3296,22 @@ struct DeviceState {
         if (empty) heap.empty_slots.insert(std::uint32_t(slot));
         else if (!heap.empty_slots.empty()) heap.empty_slots.erase(std::uint32_t(slot));
         std::memcpy(heap.copy + slot * kDescriptorSize, w, kDescriptorSize);
+        heap.live_vsharps.set(slot, leonida::ConsoleHeapVsharpSlots::is_live_vsharp(w));
         return settled;
     }
 
     // The slots on [offset, offset + bytes) of a heap copy's mirror, just brought up to date: each that differs from
     // what its arena slot was made from is written there and fixed up.
-    // Past LEONIDA_CONSOLE_FIX_US of fixing in one submission (4000 by default, 0: no limit), a changed slot is written
-    // as a null descriptor and left to retry_console_slots: after the story load the title rewrote up to 3.7 MiB of
-    // its heap at once and one submission spent 28 s fixing it (speed-8). A shader reads such a slot as empty until
-    // its turn comes.
+    // LEONIDA_CONSOLE_FIX_US limits the fixing in one submission (0, the default: no limit). Past it a changed slot is
+    // written as a null descriptor and left to retry_console_slots: after the story load the title rewrote up to
+    // 3.7 MiB of its heap at once and one submission spent 28 s fixing it (speed-8). A shader reads such a slot as
+    // empty until its turn comes, so a limit changes results: at the first world frame lib_cs_01144 read the size it
+    // divides by from a nulled buffer slot and its loops never ended, which lost the device.
     void fix_console_slots(ConsoleHeap& heap, std::size_t offset, std::size_t bytes) {
         static const std::uint64_t budget_us = [] {
             char text[16] = {};
             const DWORD n = GetEnvironmentVariableA("LEONIDA_CONSOLE_FIX_US", text, sizeof(text));
-            return n > 0 && n < sizeof(text) ? std::strtoull(text, nullptr, 10) : 4000ull;
+            return n > 0 && n < sizeof(text) ? std::strtoull(text, nullptr, 10) : 0ull;
         }();
         const std::size_t end = std::min<std::size_t>(offset + bytes, std::size_t(heap.bytes));
         if (!heap.resource_heap) {
@@ -3316,6 +3328,7 @@ struct DeviceState {
                 heap.fix_over = true;
             if (heap.fix_over) {
                 std::memset(heap.copy + at, 0, kDescriptorSize);
+                heap.live_vsharps.clear(slot);
                 ++heap.deferred_fixes;
                 if (!heap.retry[slot]) {
                     heap.retry[slot] = 1;
@@ -3401,6 +3414,7 @@ struct DeviceState {
             const auto end = std::uint32_t((offset + bytes) / kDescriptorSize);
             heap.empty_slots.erase(heap.empty_slots.lower_bound(first), heap.empty_slots.lower_bound(end));
             for (auto slot = first; slot < end; ++slot) heap.retry[slot] = 0;
+            heap.live_vsharps.clear_range(first, end);
         });
         const auto t1 = clock::now();
         heap.fix_start = t1;
@@ -3413,16 +3427,13 @@ struct DeviceState {
             heap.alias_generation = alias_generation;
             heap.checked_generation = generation;
             // Even an unchanged title slot may name a buffer released since the last submission.
-            for (size_t at = 0; at + kDescriptorSize <= heap.bytes; at += kDescriptorSize) {
-                auto* w = reinterpret_cast<uint32_t*>(heap.copy + at);
-                if (!(w[3] >> 30) && (w[2] || w[6])) {
-                    const auto slot = at / kDescriptorSize;
-                    if (!fix_console_slot(heap, slot) && !heap.retry[slot]) {
-                        heap.retry[slot] = 1;
-                        heap.retries.push_back(uint32_t(slot));
-                    }
+            // Walk the host-RAM V# bitset instead of reading every slot of `heap.copy` (which may be uncached WC VRAM).
+            heap.live_vsharps.for_each([&](std::size_t slot) {
+                if (!fix_console_slot(heap, slot) && !heap.retry[slot]) {
+                    heap.retry[slot] = 1;
+                    heap.retries.push_back(uint32_t(slot));
                 }
-            }
+            });
         }
         const auto t2 = clock::now();
         // A settled zero can acquire GPU backing without a CPU map event. Probe at most eight in
@@ -3640,6 +3651,7 @@ struct DeviceState {
                 heap->previous = heap->made.data();
             }
             heap->retry.assign(std::size_t(bytes / kDescriptorSize), 0);
+            heap->live_vsharps.reset(std::size_t(bytes / kDescriptorSize));
             heap->pages = make_shadow_pages(reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(console_va)),
                                             heap->input, std::size_t(bytes));
         }
@@ -10201,6 +10213,19 @@ void DeviceState::title_texture_unmapped(const void* resource, std::uint64_t add
 }
 
 void DeviceState::title_texture_gone(const void* resource, std::uint64_t address) {
+    if (t_in_title_textures) {  // this thread holds title_texture_mutex
+        {
+            // Never held here: ~Resource takes descriptor_mutex itself (image_owner, forget_image). The submit path
+            // reads gpu_placements under descriptor_mutex alone, so the placement must not outlive the resource.
+            std::lock_guard descriptors(descriptor_mutex);
+            gpu_placements.remove(address, resource);
+        }
+        const auto it = title_textures.find(address);
+        if (it != title_textures.end() && it->second->resource == resource) it->second->resource = nullptr;
+        titles_gone.push_back({resource, address});
+        titles_gone_pending.store(true, std::memory_order_release);
+        return;
+    }
     std::lock_guard lock(title_texture_mutex);
     {
         std::lock_guard descriptors(descriptor_mutex);
@@ -10208,6 +10233,17 @@ void DeviceState::title_texture_gone(const void* resource, std::uint64_t address
     }
     const auto it = title_textures.find(address);
     if (it != title_textures.end() && it->second->resource == resource) title_textures.erase(it);
+}
+
+void DeviceState::drain_titles_gone() {
+    if (!titles_gone_pending.load(std::memory_order_acquire)) return;
+    std::lock_guard lock(title_texture_mutex);
+    for (const auto& [resource, address] : titles_gone) {
+        const auto it = title_textures.find(address);
+        if (it != title_textures.end() && !it->second->resource) title_textures.erase(it);
+    }
+    titles_gone.clear();
+    titles_gone_pending.store(false, std::memory_order_release);
 }
 
 // The T# of a view: what the shader gets to know about it, in the structure the console's shaders read.
@@ -10663,6 +10699,14 @@ private:
     bool registered_ = false;            // added to the context, so removed from it on destruction
 };
 
+// The live devices whose session pipeline cache an ending process writes (save_pipeline_caches_at_exit). A title
+// never releases its device, so ~Device, the only other writer, does not run in a real boot: without this, a run that
+// ends (normally, at a console close or in a crash) keeps none of what it compiled. Timed, so a crash handler that
+// finds it held gives up instead of hanging the process.
+std::timed_mutex exit_cache_mutex;
+std::vector<DeviceState*> exit_cache_devices;
+std::atomic<bool> exit_cache_saved{false};
+
 // The Vulkan objects create_vulkan_device_standalone made, destroyed with the device.
 struct OwnedRuntime {
     PFN_vkDestroyDevice destroy_device = nullptr;
@@ -10689,6 +10733,10 @@ public:
         // worker still has a warm-up to run is one too high. The proxy's count waits for the pool.
         rt::d3d12_xs::set_reference_settler([] { PipelineCompiler::instance().wait_idle(); });
         state_.info = info;
+        {
+            std::lock_guard lock(exit_cache_mutex);
+            exit_cache_devices.push_back(&state_);
+        }
         queue_users_.resize(info.command_queues.size(), 0);
         compute_users_.resize(info.compute_queues.size(), 0);
         copy_users_.resize(info.copy_queues.size(), 0);
@@ -11072,7 +11120,8 @@ public:
                                                           return state_.allocate(requirements, 0,
                                                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                                                                  nullptr, /*device_address=*/true);
-                                                      });
+                                                      },
+                                                      state_.families);
             }
         }
         // The copies of a D24 texture stored as D32 convert on the GPU (vulkan_depth24.h), and so do the copies of
@@ -11539,6 +11588,11 @@ public:
     }
 
     ~Device() override {
+        {
+            // Before anything goes: an exit save in progress finishes with this device first.
+            std::lock_guard lock(exit_cache_mutex);
+            std::erase(exit_cache_devices, &state_);
+        }
         leonida::value_sink::clear_arena(&state_);  // first: it waits for a value write into the arena in progress
         raw_images_.clear();
         geometry_refresher_.reset();  // its refresh uses state_.geometry
@@ -11795,6 +11849,7 @@ public:
             if (!written) ++stats.null_views;
             if (stats.views == 64 || !(stats.views % 2048)) log_title_census("slot-70 texture views");
         }
+        state_.drain_titles_gone();
         return written;
     }
 
@@ -11928,12 +11983,13 @@ public:
         std::unique_lock lock(state_.title_texture_mutex, std::try_to_lock);
         if (!lock.owns_lock()) return;  // a slot-70 view is filling one; next time
         title_refreshed_.store(ticks, std::memory_order_relaxed);
-        const InTitleTextures inside;
+        std::optional<InTitleTextures> inside(std::in_place);
         TitleTextureStats& stats = title_stats_;
         ++stats.passes;
-        // A fill this pass makes can submit, and a submission destroys a retired image, whose destructor erases its
-        // registry entry (title_texture_gone). The registry mutex is recursive for its owner on Windows, so that
-        // erase lands inside this pass: every walk below visits a snapshot, never an iterator into the registry.
+        // A fill this pass makes can submit, and a submission destroys a retired image, whose destructor reaches
+        // title_texture_gone while this thread holds the registry mutex: the entry stops naming the resource and is
+        // erased by drain_titles_gone after the pass. Every walk below visits a snapshot, never an iterator into the
+        // registry, and skips an entry without a resource.
         const auto entries = leonida::title_texture_snapshot(state_.title_textures);
         title_pass_ = true;
         std::uint64_t checked = 0, filled = 0, fill_pass_ns = 0;
@@ -12065,7 +12121,9 @@ public:
             stats.last_log = now;
             log_title_census("refresh");
         }
+        inside.reset();
         lock.unlock();
+        state_.drain_titles_gone();
         for (Resource* r : release) r->Release();
     }
 
@@ -12366,7 +12424,8 @@ private:
         };
         auto& textures = state_.title_textures;
         const auto it = textures.find(address);
-        TitleTexture* t = it == textures.end() ? nullptr : it->second.get();
+        // An entry without a resource is one destroyed inside the registry, waiting for drain_titles_gone.
+        TitleTexture* t = it == textures.end() || !it->second->resource ? nullptr : it->second.get();
         if (!t || !TitleGpuPlacements<Resource>::matches(d, *t->resource)) {
             if (Resource* gpu = matching_gpu_placement(d, address)) {
                 ++title_stats_.of_slot133;
@@ -12752,7 +12811,7 @@ private:
         VkDeviceSize owned_bytes = 0, placed_bytes = 0, host_heap_bytes = 0;
         for (const auto& [address, t] : state_.title_textures) {
             (t->owned ? owned : slot133) += 1;
-            if (!t->owned && t->unbound_bytes) t->set_resource(t->resource);
+            if (!t->owned && t->resource && t->unbound_bytes) t->set_resource(t->resource);
             mapped += t->mapped;
             filled += t->fills > 0;
             (t->owned ? owned_bytes : placed_bytes) += t->backing_bytes;
@@ -16866,6 +16925,60 @@ bool stop_pipeline_compiles(unsigned wait_ms) {
         std::fprintf(stderr, "[rt] d3d12: a background pipeline build was still running after %u ms at exit\n",
                      wait_ms);
     return idle;
+}
+
+// How long an exit save waits for the write itself (save_session_pipeline_cache): a 77 MiB cache was measured at about
+// 36 ms (fill and publish), so this only bounds a driver that blocks the read.
+constexpr unsigned kExitCacheWriteMs = 3000;
+
+bool save_pipeline_caches_at_exit(unsigned wait_ms) {
+    if (exit_cache_saved.exchange(true)) return false;  // once: a crash during the normal exit's save does not redo it
+    std::unique_lock lock(exit_cache_mutex, std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::milliseconds(wait_ms))) {
+        std::fprintf(stderr, "[rt] d3d12: device list busy for %u ms at exit; pipeline_cache.session.bin not written\n",
+                     wait_ms);
+        return false;
+    }
+    bool wrote = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    for (DeviceState* d : exit_cache_devices) {
+        if (!d->context || !d->pipeline_cache_handle) continue;
+        // A build still running (a large one takes minutes; at a crash the faulting thread may be inside one) is
+        // given until the deadline, then the cache is written without it. Unlike at teardown, the previous file is
+        // not kept instead: the process is ending, so waiting longer is not possible and keeping the old file throws
+        // away everything this run compiled (measured: a 1,308 s boot that ended in a title fault with 2 builds
+        // running). The cache is not created EXTERNALLY_SYNCHRONIZED, so reading it during a build is valid; the
+        // snapshot holds the pipelines finished so far.
+        while (d->active_compiles.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (const unsigned building = d->active_compiles.load())
+            std::fprintf(stderr, "[rt] d3d12: %u pipeline build(s) still running at exit; writing the pipelines "
+                                 "finished so far\n", building);
+        // On a thread of its own: a driver that holds the cache until a build ends would otherwise hold the ending
+        // process too. Past the deadline the process goes on ending; the file is published by a rename
+        // (CacheStagingFile), so a write cut off there leaves the previous file whole.
+        struct Write {
+            std::mutex mutex;
+            std::condition_variable done_cv;
+            bool done = false;
+        };
+        auto write = std::make_shared<Write>();
+        std::thread([write, d] {
+            save_session_pipeline_cache(d->context->vk, d->info.device, d->pipeline_cache_handle, false, "exit");
+            std::lock_guard done_lock(write->mutex);
+            write->done = true;
+            write->done_cv.notify_all();
+        }).detach();
+        std::unique_lock write_lock(write->mutex);
+        if (!write->done_cv.wait_for(write_lock, std::chrono::milliseconds(kExitCacheWriteMs),
+                                     [&] { return write->done; })) {
+            std::fprintf(stderr, "[rt] d3d12: pipeline cache still being written after %u ms at exit; the process "
+                                 "ends without waiting for it\n", kExitCacheWriteMs);
+            return wrote;  // the device list stays as it is: the write still uses this device
+        }
+        wrote = true;
+    }
+    return wrote;
 }
 
 HRESULT create_vulkan_device(const VulkanDeviceInfo& info, REFIID riid, void** out) {
