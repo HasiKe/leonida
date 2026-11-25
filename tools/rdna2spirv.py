@@ -7240,8 +7240,14 @@ class Gen:
         if width == 32:
             return v
         r = self.tmp()
-        f = "OpBitFieldSExtract" if a.get("sext") else "OpBitFieldUExtract"
-        self.emit(f"{r} = {f} %uint {v} {self.cu(off)} {self.cu(width)}")
+        if a.get("sext"):
+            # Sign-extend with two shifts, not OpBitFieldSExtract: an NVIDIA driver (RTX 4050 Laptop, 621.01) converts
+            # the extracted field as signed under v_cvt_f32_u32 (docs/design.md, "SDWA sext source"). Same value.
+            up = self.tmp()
+            self.emit(f"{up} = OpShiftLeftLogical %uint {v} {self.cu(32 - off - width)}")
+            self.emit(f"{r} = OpShiftRightArithmetic %uint {up} {self.cu(32 - width)}")
+            return r
+        self.emit(f"{r} = OpBitFieldUExtract %uint {v} {self.cu(off)} {self.cu(width)}")
         return r
 
     def sdwa_dst(self, d, val):
