@@ -17823,6 +17823,30 @@ def fspx_wave_size(path, name):
     return None if not isinstance(wave32, bool) else (32 if wave32 else 64)
 
 
+def drop_final_halts(insns):
+    """Remove the s_sethalt instructions that change nothing a translated wave can see.
+
+    s_sethalt sets the wave's HALT bit to SIMM16[0] (RDNA2 ISA, SOPP): 1 stops issuing instructions until a debugger
+    or the host clears it, 0 lets it run. Nothing clears it in a translated dispatch, so a halt right before
+    s_endpgm ends the wave exactly where the s_endpgm would, after the same memory writes, and s_sethalt 0 does
+    nothing. A halt with more code after it would hang the wave on the console, which an invocation cannot do;
+    that one is refused.
+    """
+    out = []
+    for k, ins in enumerate(insns):
+        if base_op(ins["op"]) != "s_sethalt":
+            out.append(ins)
+            continue
+        a = ins["args"]
+        value = a[0].get("v") if a and a[0].get("k") == "imm" else None
+        if not isinstance(value, int):
+            raise Unsupported("s_sethalt without an immediate")
+        nxt = insns[k + 1]["op"] if k + 1 < len(insns) else None
+        if value & 1 and nxt != "s_endpgm":
+            raise Unsupported("s_sethalt 1 before more code")
+    return out
+
+
 def translate(path):
     info = parse_file(path)
     stage = stage_of(info["name"], path)
@@ -17909,6 +17933,7 @@ def translate(path):
             raise Unsupported("reachable instruction with normalized encoding")
     else:
         check_printed_encodings(path, info)
+    insns = drop_final_halts(insns)
     g = Gen(stage, hoist_reg_ptrs=True, cache_active=True)
     g.vcc_scalar_pointer = any(i["op"].startswith("s_load_dword") and len(i["args"]) >= 2 and
                                i["args"][1].get("t") == "vcc" for i in insns)
