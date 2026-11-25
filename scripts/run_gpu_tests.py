@@ -50,7 +50,7 @@ from check import run_readback
 from check import MESH_COMPUTE, mesh_env   # LEONIDA_MESH_COMPUTE=1: mesh shaders as compute + a generated VS
 from check import (WAVE32_LANE_DUMPS, WAVE32_LANE_ENV, bitmask_perm_narrow_skip, narrow_subgroup_skip,
                    unpinned_subgroup_skip, vcmpx_forms_narrow_skip, wave32_lane_skip)   # as in check.py
-from check import PIXEL_VERTEX, VINT_ENV, interp_f16_high_problem, ij_computed_problem, mandelbrot_problem   # pixel producers and checks
+from check import PIXEL_VERTEX, VINT_ENV, interp_f16_high_problem, ij_computed_problem, mandelbrot_problem, exp_f32_denorm_problem   # pixel producers and checks
 from check import barycentric_problem
 from check import NAN_PAYLOAD_TEST, nan_payload_problem
 from check import GET_LOD_TESTS, STORE_WORDS, get_lod_test, store_words_problem   # TEST-184: image atomics and queries
@@ -1503,6 +1503,7 @@ def run_suite(a, work: str) -> int:
                 "ps_ops7": (0x00FF8077, 0xFF0000FF, 0x89ABCDEF, 0x00070003),
                 "ps_ops8": (0x80000000, 0xBFFFFFFF, 0x000F100E, 0x0F0F0F1F),
                 "ps_f32_mods": (0xC0256A01, 0x3F800000, 0x41E00000, 0x3FC00000),
+                "ps_exp_f32_denorm": (0x01000000, 0x00800000, 0x00000000, 0x00000000),
                 "ps_vcc_x2": (0x11223344, 0x55667788, 0, 0),
                 "ps_vcmpx_forms": (0xF05B2A48, 0xF05E8A12, 0xB174BE18, 0x15550000),   # 14 v_cmpx forms (.asm header)
                 "ps_vcmp_int32": (0x963E52E8, 0x984DCEE8, 0xB9458EE8, 0xB73612E8),   # u32/i32 compares (.asm header)
@@ -1594,6 +1595,9 @@ def run_suite(a, work: str) -> int:
             elif name == "ps_ij_computed":
                 problem = ij_computed_problem(read_raw_u32(raw) if os.path.isfile(raw) else [])
                 ok, detail = not problem, problem or "computed I/J pair words and v/2 within 1e-6"
+            elif name == "ps_exp_f32_denorm_rt":
+                problem = exp_f32_denorm_problem(read_raw_u32(raw) if os.path.isfile(raw) else [])
+                ok, detail = not problem, problem or "4096 pixels exact across 64 runtime-dependent inputs"
             elif name == "ps_mandelbrot":
                 px = read_raw_u32(raw) if os.path.isfile(raw) else []
                 problem = frame_problem(px) or mandelbrot_problem(px)

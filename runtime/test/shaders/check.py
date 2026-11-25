@@ -790,6 +790,7 @@ PIXEL_BITS = {"ps_clip_color": (0x3e800000, 0x3f000000, 0x3f400000, 0x3f800000),
               "ps_ops7": (0x00ff8077, 0xff0000ff, 0x89abcdef, 0x00070003),
               "ps_ops8": (0x80000000, 0xbfffffff, 0x000f100e, 0x0f0f0f1f),
               "ps_f32_mods": (0xc0256a01, 0x3f800000, 0x41e00000, 0x3fc00000),
+              "ps_exp_f32_denorm": (0x01000000, 0x00800000, 0x00000000, 0x00000000),
               "ps_scc": (1, 1, 3, 0x80000000), "ps_sdwa": (0x000000f1, 0xbffefff2, 0x3c003344, 0xbff70000),
               # 16-bit SDWA results with dst_sel:DWORD zero the high half (.asm header, measured on gfx1036)
               "ps_sdwa_dword_hi": (0x00004000, 0x00000003, 0x00004700, 0x0000c000),
@@ -2038,6 +2039,20 @@ def mandelbrot_counts(w):
     return counts
 
 
+def exp_f32_denorm_problem(px):
+    if len(px) != 4096:
+        return f"expected 4096 pixels, got {len(px)}"
+    for i, pixel in enumerate(px):
+        x = i % 64
+        result = (0x01000000, 0x00800000)[x] if x < 2 else 0
+        exponent = struct.unpack('<I', struct.pack('<f', -125.0 - x))[0]
+        column = struct.unpack('<I', struct.pack('<f', float(x)))[0]
+        expected = (result, exponent, column, result)
+        if tuple(pixel) != expected:
+            return f"pixel {i}: got {pixel}, expected {expected}"
+    return ''
+
+
 def mandelbrot_problem(px):
     """ps_mandelbrot: channel 3 is the lane's iteration count. A lane that leaves EXEC too early or late, or a loop
     that ends on the wrong branch, changes counts; the colour channels are only for looking at the frame."""
@@ -2151,6 +2166,8 @@ def pixel_test(tools, spirv, name):
         c = collections.Counter((a, b) for a, b, _, _ in px)
         fine = c[(8, 1)] and c[(8, 0)] and c[(7, 0)] and set(c) <= {(8, 1), (8, 0), (7, 0)}
         return "" if fine else f"(s5, bit) counts {dict(c)}"
+    if name == "ps_exp_f32_denorm_rt":
+        return exp_f32_denorm_problem(px)
     if name == "ps_mandelbrot":
         return mandelbrot_problem(px)
     return "no check written for this shader"
