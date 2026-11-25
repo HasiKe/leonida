@@ -25,6 +25,8 @@
 ; 0x8004) for the same reason (TEST-FMA-FUSED-F16-RUNTIME). As three literals the whole f16 multiply-add was a
 ; compile-time constant, and MoltenVK 1.4.2 gave the wrong one: word 7 read 0x0000 on an Apple M5 (0x3c00 in an
 ; earlier report), while the same translation with any one of the three taken at run time gave 0x7351.
+; Computed at run time the word reads 0x7352 on KosmicKrisp (Mesa 26.3.1, Apple M3), the product-rounded-first
+; value: docs/testing.md, Known problems.
 ; Run: VKC_SGPRS=0x3f800800,0x3f800001,0x3f7ffffe,0xbf800002 vk_compute_test cs_fma_fused.spv 1 dump
 ; out[0..7] = 33800000 a8800000 3a000400 33800000 33800000 33800000 28800000 00007351 (hex)
 ; group: 1,1,1
