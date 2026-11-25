@@ -191,6 +191,24 @@ class GlbInspectTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(len(result.stderr.strip().splitlines()), 1, result.stderr)
 
+    def test_inspect_file_skips_bin_and_extension_payloads(self):
+        metadata = json_bytes(triangle_gltf())
+        data = raw_glb([(JSON_CHUNK, metadata), (BIN_CHUNK, bytes(4096)), (EXT_CHUNK, bytes(4096))])
+        expected = glb_inspect.build_report(glb_inspect.parse_glb(data), len(data))
+        bin_start = 12 + 8 + len(metadata) + 8
+        ext_start = bin_start + 4096 + 8
+
+        class MetadataReadsOnly(io.BytesIO):
+            def read(self, size=-1):
+                start = self.tell()
+                for payload in (bin_start, ext_start):
+                    if size < 0 or (start < payload + 4096 and start + size > payload):
+                        raise AssertionError("inspector read a binary payload")
+                return super().read(size)
+
+        with mock.patch("builtins.open", return_value=MetadataReadsOnly(data)):
+            self.assertEqual(glb_inspect.inspect_file("model.glb"), expected)
+
     def test_extension_only_base_color_image(self):
         for extension, uri in (("KHR_texture_basisu", "tile.ktx2"), ("EXT_texture_webp", "tile.webp")):
             with self.subTest(extension=extension):
