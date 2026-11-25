@@ -13,6 +13,8 @@ Usage:
     python -I tools/batch_glb.py <in_dir> <out_dir> [--jobs N] [--up z|y] [--textures <dir>]
 Usage: `python -I tools/batch_glb.py --help` lists the options.
 
+PNG is preferred when PNG and DDS share a stem. If it cannot be loaded, its diagnostic is
+retained and the converter tries the matching DDS.
 A matched texture is also reported as unembedded when none of its primitives has UV coordinates.
 """
 from __future__ import annotations
@@ -36,20 +38,17 @@ def _existing_texture_dir(value: str) -> str:
     return value
 
 
-def _build_texture_index(texture_dir: str | None) -> dict[str, str]:
-    """Index available texture files (.png and .dds) by lowercase basename without extension."""
-    if not texture_dir:
-        return {}
-    index: dict[str, str] = {}
-    for entry in os.scandir(texture_dir):
-        if not entry.is_file():
-            continue
-        lower = entry.name.lower()
-        if lower.endswith(".png") or lower.endswith(".dds"):
-            stem = os.path.splitext(lower)[0]
-            # Prefer png over dds if both exist
-            if stem not in index or lower.endswith(".png"):
-                index[stem] = entry.path
+def _build_texture_index(texture_dir: str | None) -> dict[str, list[str]]:
+    """Index files by lowercase stem, in PNG-before-DDS preference order."""
+    index: dict[str, list[str]] = {}
+    if texture_dir:
+        with os.scandir(texture_dir) as entries:
+            for entry in entries:
+                stem, ext = os.path.splitext(entry.name.lower())
+                if ext in (".png", ".dds") and entry.is_file():
+                    index.setdefault(stem, []).append(entry.path)
+        for paths in index.values():
+            paths.sort(key=lambda path: (not path.lower().endswith(".png"), path))
     return index
 
 
@@ -93,7 +92,7 @@ class TextureCache:
 
 
 def convert_single(
-    args_tuple: tuple[str, str, str, dict[str, str], int, TextureCache],
+    args_tuple: tuple[str, str, str, dict[str, str | list[str]], int, TextureCache],
 ) -> tuple[bool, str, str, list[tuple[str, str]]]:
     in_path, out_path, up_axis, tex_index, max_tex_size, tex_cache = args_tuple
     dropped: list[tuple[str, str]] = []
@@ -124,13 +123,10 @@ def convert_single(
                     f"{clean_stem}_diff",
                 ])
 
-                found_path = None
-                for key in lookup_keys:
-                    if key in tex_index:
-                        found_path = tex_index[key]
-                        break
-
-                if found_path:
+                candidates = next((tex_index[key] for key in lookup_keys if key in tex_index), [])
+                if isinstance(candidates, str):
+                    candidates = [candidates]   # callers may supply a single path for each stem
+                for found_path in candidates:
                     png_bytes, why_not = tex_cache.get_or_load(found_path, max_size=max_tex_size)
                     if why_not and found_path not in dropped_seen:
                         dropped_seen.add(found_path)        # one line per texture per model, not per primitive
@@ -141,6 +137,7 @@ def convert_single(
                             "name": mat_name or clean_stem,
                             "png_bytes": png_bytes,
                         }
+                        break
             dropped.extend((path, "matching primitives have no texture coordinates")
                            for path, has_uv in texture_has_uv.items() if not has_uv)
 
