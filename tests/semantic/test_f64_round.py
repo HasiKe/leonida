@@ -124,8 +124,11 @@ class F64RoundSpecialSources(unittest.TestCase):
             # Source modifiers first: floor of -(+subnormal) is -1 and ceil of |-subnormal| is 1.
             self.assertEqual(run_bits("v_floor_f64_e64 v[4:5], -v[0:1]", smallest), self.SIGN | self.ONE)
             self.assertEqual(run_bits("v_ceil_f64_e64 v[4:5], |v[0:1]|", smallest | self.SIGN), self.ONE)
-            # The output modifiers then work on that result: ceil of the smallest subnormal, doubled, is 2.
-            self.assertEqual(run_bits("v_ceil_f64_e64 v[4:5], v[0:1] mul:2", smallest), 0x4000000000000000)
+            # Of the output modifiers only `clamp` then works on that result (the omod is dropped, docs/design.md,
+            # "v_add_f64 output modifiers"): ceil of the smallest subnormal stays 1 under mul:2, and floor of the
+            # smallest negative one, -1, clamps to 0.
+            self.assertEqual(run_bits("v_ceil_f64_e64 v[4:5], v[0:1] mul:2", smallest), self.ONE)
+            self.assertEqual(run_bits("v_floor_f64_e64 v[4:5], v[0:1] clamp", smallest | self.SIGN), 0)
 
     def test_every_other_source_still_goes_through_the_driver_s_function(self):
         cases = (("v_trunc_f64", -0.75, -0.0), ("v_ceil_f64", -0.25, -0.0), ("v_rndne_f64", 2.5, 2.0),
