@@ -675,6 +675,12 @@ void test_inherited_reservation() {
     check(!br::inherited(), "LEONIDA_BASE_RESERVED without a size is no reservation");
     SetEnvironmentVariableW(br::kVariable, L"zz:30000000");
     check(!br::inherited(), "LEONIDA_BASE_RESERVED with a non-hex base is no reservation");
+    SetEnvironmentVariableW(br::kVariable, L"140000000:30000000junk");
+    check(!br::inherited(), "LEONIDA_BASE_RESERVED with trailing junk is rejected");
+    SetEnvironmentVariableW(br::kVariable, L"ffffffffffff0000:20000");
+    check(!br::inherited(), "LEONIDA_BASE_RESERVED whose base + size wraps 64 bits is rejected");
+    SetEnvironmentVariableW(br::kVariable, L"10000000000000000:10000");
+    check(!br::inherited(), "LEONIDA_BASE_RESERVED with overflowing 64-bit hex base is rejected");
     SetEnvironmentVariableW(br::kVariable, nullptr);
     check(!br::inherited(), "no LEONIDA_BASE_RESERVED is no reservation");
 
