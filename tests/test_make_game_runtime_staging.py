@@ -165,6 +165,48 @@ class RuntimeStagingTests(unittest.TestCase):
         self.assertEqual(read(os.path.join(self.out, dll)), self.old[dll])
         self.assertEqual(read(os.path.join(self.out, "game_path.txt")), self.old["game_path.txt"])
 
+    def test_failed_restore_of_the_file_being_published_keeps_its_old_copy(self):
+        # Moving the new exe in fails and putting the old exe back fails too: the old exe then exists only in the
+        # staging folder, which must be kept (IncompleteRollback), not removed with the failed install.
+        real = os.replace
+        exe = make_game.RUNTIME_FILES[0]
+
+        def replace(src, dst):
+            if os.path.basename(dst) == exe and not src.endswith(".old"):
+                raise PermissionError(13, "Access is denied", dst)       # the new exe cannot take its place
+            if os.path.basename(dst) == exe:
+                raise PermissionError(13, "Access is denied", dst)       # nor can the old one go back
+            return real(src, dst)
+
+        with patch.object(make_game.os, "replace", replace):
+            with self.assertRaises(make_game.IncompleteRollback) as raised:
+                install(self.game, self.out, self.artifacts)
+        e = raised.exception
+        self.assertEqual([name for name, _ in e.failures], [exe])
+        self.assertEqual(read(os.path.join(e.stage, exe + ".old")), self.old[exe])
+
+    def test_stale_staging_folders_are_removed_by_the_next_install(self):
+        stale = os.path.join(self.out, ".runtime-staging-left-by-a-running-exe")
+        os.makedirs(stale)
+        with open(os.path.join(stale, "gta6rt.exe.old"), "wb") as f:
+            f.write(b"old")
+        install(self.game, self.out, self.artifacts)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_bcpack_history_is_built_where_the_runtime_reads_it(self):
+        # runtime/shims/dstorage.cpp reads <work>/shaders/bcpack/history.bcph (shaders.parent_path() / "bcpack")
+        import ttpf_mips
+        work = os.path.join(self.tmp, "work")
+        calls = []
+        with patch.object(ttpf_mips, "find_pools", lambda game: [object()]), \
+                patch.object(make_game, "py", lambda *args: calls.append(args)), \
+                patch.object(make_game, "wine_launcher", lambda *args: LAUNCHER), \
+                patch.object(make_game, "log", lambda *args, **kw: None):
+            make_game.runtime(self.game, self.out, {"expected_exe": "game.exe"}, self.build, work=work)
+        self.assertEqual(len(calls), 1)
+        out = calls[0][calls[0].index("--out") + 1]
+        self.assertEqual(out, os.path.join(os.path.abspath(work), "shaders", "bcpack", "history.bcph"))
+
     def test_runtime_build_in_the_output_folder_is_left_in_place(self):
         # --runtime-build pointing at --out: the runtime files are already there and are not copied onto themselves
         artifacts = [os.path.join(self.out, name) for name in make_game.RUNTIME_FILES]
