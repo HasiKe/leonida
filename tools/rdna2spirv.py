@@ -13055,7 +13055,10 @@ class Gen:
         """image_gather4_c_lz[_o]: the depth-compare gather at the base level, as OpImageDrefGather (docs/design.md,
         "image_gather4_c_lz"). Address order after the optional offset dword: z-compare, s, t, [slice] (GFX10 MIMG:
         offset, bias, zcompare, derivatives, coordinates, LOD; there is no LOD here). The four results are the four
-        comparisons in gather order, the compare function comes from the sampler as for image_sample_c_lz."""
+        comparisons in gather order, the compare function comes from the sampler as for image_sample_c_lz.
+        Sources agree (docs/design.md): LLVM's AMDGPUSampleVariant address order and llvm-mc's dword counts; Mesa ACO's
+        visit_tex selects exactly these two opcodes for a shadow tg4 at level zero, pushes offset, compare, coordinates,
+        keeps the compare whole under a16, and sets dmask 1 for every shadow gather (hence the dmask refusal)."""
         if is3d or dim not in ("dim:SQ_RSRC_IMG_2D", "dim:SQ_RSRC_IMG_2D_ARRAY", "dim:SQ_RSRC_IMG_CUBE"):
             raise Unsupported(op + " " + dim.split("SQ_RSRC_IMG_")[-1])
         if dmask != 1:

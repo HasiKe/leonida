@@ -10,8 +10,9 @@ half) it was read from, and compare it with the position written out by hand bel
   2D 3 dwords (z, s, t), array and cube 4 (z, s, t, slice), the offset form one more (the offset dword first),
   under a16 the coordinates pack in halves (2D: z, st; array: z, st, slice) and the z-compare keeps a whole dword.
 
-Mesa ACO's tg4-with-comparator selection was not read (gitlab.freedesktop.org and the GitHub mirror were not reachable
-from the machine this was written on); see docs/design.md. Nothing here ran on a GPU.
+Mesa's ACO `visit_tex` agrees: a shadow tg4 at level zero is image_gather4_c_lz / _c_lz_o, the address is pushed as
+offset, compare, coordinates (the compare stays a whole dword under a16), and dmask is 1 for every shadow gather
+(docs/design.md). Nothing here ran on a GPU.
 Standard library only (spirv-as / spirv-val are used when they are on PATH); no game files.
 """
 import os
