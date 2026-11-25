@@ -2522,6 +2522,10 @@ def install_runtime(game: str, out: str, artifacts: list, work: str | None = Non
     instead of a new gta6rt.exe next to an old gta6rt_tls_host.dll. The one exception is a rollback that is itself
     blocked (IncompleteRollback): the staging folder, which then holds the old files, is kept for recovery."""
     os.makedirs(out, exist_ok=True)
+    # A run that kept its staging folder (IncompleteRollback), or that could not delete the old gta6rt.exe it moved
+    # there because the game was still running, leaves one behind.
+    for stale in glob.glob(os.path.join(glob.escape(out), ".runtime-staging-*")):
+        shutil.rmtree(stale, ignore_errors=True)
     stage = tempfile.mkdtemp(prefix=".runtime-staging-", dir=out)
     try:
         staged = []
@@ -2578,6 +2582,7 @@ def publish(stage: str, out: str, names: list) -> None:
     already published are taken back out and the old ones restored, and the error is raised, so `out` never mixes a
     new gta6rt.exe with an old gta6rt_tls_host.dll."""
     done = []  # (name, whether an old copy was moved aside), in publish order
+    failures = []  # (name, error) for every old file that could not be put back
     try:
         for name in names:
             target, backup = os.path.join(out, name), os.path.join(stage, name + ".old")
@@ -2588,11 +2593,13 @@ def publish(stage: str, out: str, names: list) -> None:
                 os.replace(os.path.join(stage, name), target)
             except BaseException:
                 if had_old:
-                    os.replace(backup, target)
+                    try:
+                        os.replace(backup, target)
+                    except OSError as e:     # the old copy is then only in `stage`: keep it (IncompleteRollback)
+                        failures.append((name, e))
                 raise
             done.append((name, had_old))
-    except BaseException as cause:
-        failures = []                       # every step is tried, so one blocked file does not stop the rest
+    except BaseException as cause:          # every step is tried, so one blocked file does not stop the rest
         for name, had_old in reversed(done):
             target, backup = os.path.join(out, name), os.path.join(stage, name + ".old")
             try:
@@ -2638,7 +2645,7 @@ def runtime(game: str, out: str, v: dict, runtime_build: str | None = None, jobs
     if work is not None:
         from ttpf_mips import find_pools
         if find_pools(game):
-            profile = os.path.join(os.path.abspath(work), "bcpack", "history.bcph")
+            profile = os.path.join(os.path.abspath(work), "shaders", "bcpack", "history.bcph")
             native = os.path.join(build, "bcpack_history_train.exe")
             trainer = ["--trainer", native] if os.name == "nt" and os.path.isfile(native) else []
             py("build_dstorage_history.py", game, "--out", profile, "--if-needed", *trainer)
@@ -2651,7 +2658,7 @@ def runtime(game: str, out: str, v: dict, runtime_build: str | None = None, jobs
              "again, which installs the new files).")
     except OSError as e:
         fail(f"runtime: could not install into {out} ({e}); the previous files there are unchanged. If a program has "
-             "one of them open (a running gta6rt.exe, an antivirus scan), close it and run the stage again.")
+             "one of them open without allowing it to be renamed (an antivirus scan, another program), close it and run the stage again.")
     start = os.path.join(out, "gta6rt.exe" if os.name == "nt" else "gta6rt.sh")
     image = os.path.join(game, v["expected_exe"])
     if not os.path.isfile(image):
