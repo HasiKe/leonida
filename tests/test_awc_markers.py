@@ -356,7 +356,7 @@ class OutputSafetyTest(unittest.TestCase):
             self.assertEqual(rc, 2, err.getvalue())
             self.assertIn("overwrite", err.getvalue())
             self.assertEqual(out.getvalue(), "")
-            self.assertFalse(os.path.exists(alias))
+            self.assertEqual(os.listdir(banks), ["a.awc"])
             with open(in_dir, "rb") as f:
                 self.assertEqual(f.read(), payload)
 
