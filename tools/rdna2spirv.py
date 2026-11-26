@@ -1790,7 +1790,10 @@ class Gen:
                 self.insn(ins)
                 self.check_lane_local(ins, self.body[start:])
                 if len(self.x_marks) != marks:   # a segment boundary would cut the `if (active)` in two
-                    raise AssertionError(f"{ins['op']} split an emulated wave64 round inside an active run")
+                    # An internal invariant, not an unsupported pattern: lane_local() admitted an instruction that
+                    # ends a segment. The corpus loop counts it as a translator error for this one shader.
+                    raise AssertionError(f"internal: {ins['op']} split an emulated wave64 round inside an active "
+                                         "run (lane_local admitted a segment boundary)")
             self.active_run = False
             self.emit(f"OpBranch {end}")
             self.emit(f"{end} = OpLabel")
