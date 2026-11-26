@@ -3911,6 +3911,10 @@ if(TARGET Vulkan::Headers)
       # The same return copy for a slot-133 buffer's shadow (the write-back of a compute result the title reads again).
       add_test(NAME d3d12_placed_write_back COMMAND d3d12_title_va_test --placed-writeback)
       set_tests_properties(d3d12_placed_write_back PROPERTIES SKIP_RETURN_CODE 77)
+      # The same over write-watched pages: a write the title makes between two submissions, which no fault reports,
+      # still wins over the GPU's older result (the write-back asks the kernel first).
+      add_test(NAME d3d12_placed_write_back_hot COMMAND d3d12_title_va_test --placed-writeback-hot)
+      set_tests_properties(d3d12_placed_write_back_hot PROPERTIES SKIP_RETURN_CODE 77)
       # Two shadows over one page share their sums: a newly filled one must still follow the title's bytes, with
       # LEONIDA_SHADOW_KEEP on and off (review by lixonik).
       add_test(NAME d3d12_shadow_keep_refill COMMAND d3d12_title_va_test --shadow-keep-refill)

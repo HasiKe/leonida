@@ -555,10 +555,15 @@ int submit_write(WriteBack& s, std::uint64_t va) {
 // The same gap on a buffer the title places at its own address (slot 133, the retail case for a compute result it
 // reads back): the pages are not imported here, so the buffer is a shadow, and the write of a root UAV over the
 // title's VA must reach the pages at the next submission - and the title's own newer words must still win.
-int check_placed_write_back(Context& c, bool geometry) {
-    void* pages = VirtualAlloc(nullptr, kPages, MEM_TOP_DOWN | MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+// `hot`: the pages are a write-watched reservation (MEM_WRITE_WATCH, as xmem reserves the title's ordinary memory),
+// so the title's first write makes their block hot: writable from then on, its writes known only by asking the
+// kernel. A write the title makes between two submissions must still win over the GPU's older result.
+int check_placed_write_back(Context& c, bool geometry, bool hot = false) {
+    void* pages = VirtualAlloc(nullptr, kPages, MEM_TOP_DOWN | MEM_RESERVE | MEM_COMMIT | (hot ? MEM_WRITE_WATCH : 0),
+                               PAGE_READWRITE);
     EXPECT(pages);
     const auto title_va = reinterpret_cast<std::uint64_t>(pages);
+    if (hot) leonida::title_write_watch::add(title_va, kPages);
     auto* words = static_cast<std::uint32_t*>(pages);
     for (UINT i = 0; i < kPages / 4; ++i) words[i] = 0xA0000000u + i * 3u;  // never zero, unlike the shader's rows
     auto& aliases = leonida::title_va_aliases();
@@ -626,8 +631,23 @@ int check_placed_write_back(Context& c, bool geometry) {
     std::printf("placed buffer write back: the title's own words survived %u/%u\n", kept, kElements);
     EXPECT(kept == kElements);
 
+    if (hot) {
+        // That write faulted, so the block is hot. The next submission copies the GPU's newer result back (the title
+        // did not write since) and finds the page clean when it asks. Then the title writes again, with no fault: the
+        // submission after must ask before it copies the GPU's result back, or that write is lost.
+        EXPECT(submit_write(s, title_va) == 0);
+        for (UINT i = 0; i < kElements; ++i) words[i] = 0xC0FFEE11u;
+        EXPECT(submit_write(s, title_va) == 0);
+        UINT kept_hot = 0;
+        for (UINT i = 0; i < kElements; ++i) kept_hot += words[i] == 0xC0FFEE11u;
+        std::printf("placed buffer write back, write-watched pages: the title's unfaulted words survived %u/%u\n",
+                    kept_hot, kElements);
+        EXPECT(kept_hot == kElements);
+    }
+
     placed.reset();  // the shadow goes, the pages stay writable
     aliases.remove_title_memory(title_va);
+    if (hot) leonida::title_write_watch::remove(title_va);
     VirtualFree(pages, 0, MEM_RELEASE);
     return 0;
 }
@@ -1229,6 +1249,7 @@ int main(int argc, char** argv) {
     const bool window_cap = argc == 2 && std::strcmp(argv[1], "--window-cap") == 0;
     const bool window_write_back = argc == 2 && std::strcmp(argv[1], "--window-writeback") == 0;
     const bool placed_write_back = argc == 2 && std::strcmp(argv[1], "--placed-writeback") == 0;
+    const bool placed_write_back_hot = argc == 2 && std::strcmp(argv[1], "--placed-writeback-hot") == 0;
     const bool keep_refill = argc == 2 && std::strcmp(argv[1], "--shadow-keep-refill") == 0;
     if (window_cap) {
         const char* cap = std::getenv("LEONIDA_TITLE_WINDOWS_MB");
@@ -1344,8 +1365,12 @@ int main(int argc, char** argv) {
             std::printf("title memory past the window cap: the views were zero-size and the shader read zeros\n");
             return 0;
         }
-        if (placed_write_back) {
-            if (check_placed_write_back(c, geometry)) return 1;
+        if (placed_write_back || placed_write_back_hot) {
+            if (placed_write_back_hot && !leonida::title_write_watch::enabled()) {
+                std::printf("write watching is off here (Wine, LEONIDA_WRITE_WATCH=0 or no private heap): skipped\n");
+                return 77;
+            }
+            if (check_placed_write_back(c, geometry, placed_write_back_hot)) return 1;
             if (d.validation_errors()) {
                 std::fprintf(stderr, "%u validation errors\n", d.validation_errors());
                 return 1;
