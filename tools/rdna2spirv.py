@@ -2116,13 +2116,10 @@ class Gen:
         elif ty in ("u16", "i16"):
             sel, _ = self.opsel_bits(mods, 2)
             x, y = self.src_u(srcs[0]), self.src_u(srcs[1])
-            xs, ys = self.tmp(), self.tmp()
-            f = "OpBitFieldSExtract" if ty == "i16" else "OpBitFieldUExtract"
-            self.emit(f"{xs} = {f} %uint {x} {self.cu(16 if sel[0] else 0)} {self.cu(16)}")
-            self.emit(f"{ys} = {f} %uint {y} {self.cu(16 if sel[1] else 0)} {self.cu(16)}")
-            x, y = xs, ys
             if ty == "i16":
-                x, y = self.as_int(x), self.as_int(y)
+                x, y = self.i16_half(x, sel[0]), self.i16_half(y, sel[1])
+            else:
+                x, y = self.u16_half(x, sel[0]), self.u16_half(y, sel[1])
             s = ty == "i16"
             ops = {"lt": "OpSLessThan" if s else "OpULessThan", "le": "OpSLessThanEqual" if s else "OpULessThanEqual",
                    "gt": "OpSGreaterThan" if s else "OpUGreaterThan",
@@ -7539,6 +7536,8 @@ class Gen:
         off, width = self.SDWA_SEL[a["sdwa_sel"]]
         if width == 32:
             return v
+        if off == 16 and width == 16:
+            return self.as_uint(self.i16_half(v, 1)) if a.get("sext") else self.u16_half(v, 1)
         r = self.tmp()
         f = "OpBitFieldSExtract" if a.get("sext") else "OpBitFieldUExtract"
         self.emit(f"{r} = {f} %uint {v} {self.cu(off)} {self.cu(width)}")
@@ -8167,7 +8166,7 @@ class Gen:
             # rather than saturating to 0xFFFF, and max/min results are unchanged). neg_lo/neg_hi are float-only.
             # Constant operands are treated as 32-bit dwords: op_sel=0 selects bits [15:0], op_sel=1 selects [31:16]
             # (measured on gfx1036). Positive inlines zero-extend, negative inlines sign-extend, 32-bit literals
-            # retain their full dword; OpBitField*Extract at 16*sl[i] lowers this directly.
+            # retain their full dword; u16_half/i16_half lowers this without OpBitField{S,U}Extract at offset 16.
             def bits(name, default):
                 m = next((m for m in mods if m.startswith(name + ":")), None)
                 return [int(v) for v in m.split("[")[1].rstrip("]").split(",")] if m else default
@@ -8181,14 +8180,10 @@ class Gen:
             signed = op.endswith("i16")
             clamp = "clamp" in mods and kind in ("add", "sub", "mad")
             srcs = [self.src_u(t) for t in a[1:1 + ns]]
-            ext = "OpBitFieldSExtract" if signed else "OpBitFieldUExtract"
             halves = []
             for sl in (sel, selhi):
-                v = []
-                for i in range(ns):
-                    e = self.tmp()
-                    self.emit(f"{e} = {ext} %uint {srcs[i]} {self.cu(16 * sl[i])} {self.cu(16)}")
-                    v.append(e)
+                v = [self.as_uint(self.i16_half(srcs[i], sl[i])) if signed else self.u16_half(srcs[i], sl[i])
+                     for i in range(ns)]
                 r = self.tmp()
                 if kind in ("add", "sub"):
                     self.emit(f"{r} = {'OpIAdd' if kind == 'add' else 'OpISub'} %uint {v[0]} {v[1]}")
@@ -9999,8 +9994,7 @@ class Gen:
                     self.emit(f"{t2} = OpShiftLeftLogical %uint {x_hi} {self.cu(32 - 8 * k)}")
                     self.emit(f"{win} = OpBitwiseOr %uint {t1} {t2}")
                 acc_w = c_lo if k < 2 else c_hi
-                total = self.tmp()
-                self.emit(f"{total} = OpBitFieldUExtract %uint {acc_w} {self.cu(16 * (k % 2))} {self.cu(16)}")
+                total = self.u16_half(acc_w, k % 2)
                 for off in (0, 8, 16, 24):
                     xb, yb, hi_, lo_, d, t = (self.tmp() for _ in range(6))
                     self.emit(f"{xb} = OpBitFieldUExtract %uint {win} {self.cu(off)} {self.cu(8)}")
@@ -10041,6 +10035,8 @@ class Gen:
             for off in range(0, 32, width):
                 if width == 32:
                     xa, ya = x, y
+                elif width == 16:
+                    xa, ya = self.u16_half(x, off // 16), self.u16_half(y, off // 16)
                 else:
                     xa, ya = self.tmp(), self.tmp()
                     self.emit(f"{xa} = OpBitFieldUExtract %uint {x} {self.cu(off)} {self.cu(width)}")
@@ -12781,12 +12777,9 @@ class Gen:
             # (u16) or [0x80000000, 0x7fffffff] (i16), before that shift.
             sel, dhi = self.opsel_bits(mods, 3)
             signed = op == "v_mad_i32_i16"
-            ext = "OpBitFieldSExtract" if signed else "OpBitFieldUExtract"
-            hs = []
-            for i, src in enumerate(a[1:3]):
-                h = self.tmp()
-                self.emit(f"{h} = {ext} %uint {self.src_u(src)} {self.cu(16 * sel[i])} {self.cu(16)}")
-                hs.append(h)
+            hs = [self.as_uint(self.i16_half(self.src_u(src), sel[i])) if signed
+                  else self.u16_half(self.src_u(src), sel[i])
+                  for i, src in enumerate(a[1:3])]
             c = self.src_u(a[3])
             if sel[2]:
                 c2 = self.tmp()
@@ -14680,13 +14673,11 @@ class Gen:
                 if (dmask >> c) & 1:
                     ri, hi = pos >> 1, pos & 1
                     reg = d16_regs[ri]
-                    fc, uc, sc = self.tmp(), self.tmp(), self.tmp()
+                    fc = self.tmp()
                     self.emit(f"{fc} = OpCompositeExtract %float {f_pairs[ri]} {hi}")
-                    self.emit(f"{uc} = OpBitFieldUExtract %uint {reg} {self.cu(16 * hi)} {self.cu(16)}")
-                    self.emit(f"{sc} = OpBitFieldSExtract %uint {reg} {self.cu(16 * hi)} {self.cu(16)}")
                     fv.append(fc)
-                    uv.append(uc)
-                    sv.append(self.as_int(sc))
+                    uv.append(self.u16_half(reg, hi))
+                    sv.append(self.i16_half(reg, hi))
                     pos += 1
                 else:
                     fv.append(self.tof(self.cu(0)))
@@ -15272,6 +15263,11 @@ class Gen:
         i = self.tmp()
         self.emit(f"{i} = OpBitcast %int {u}")
         return i
+
+    def as_uint(self, i):
+        u = self.tmp()
+        self.emit(f"{u} = OpBitcast %uint {i}")
+        return u
 
     # ---- legacy (merged ES/GS) geometry shader on LDS rings ----
     # Inputs: input vertex i sits at the dword offset the system VGPRs give (v0 lo/hi, v1 lo); the entry sets them
