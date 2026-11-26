@@ -292,6 +292,21 @@ def exit_status(returncode: int) -> str:
     return f"exit {returncode}"
 
 
+def fatal_process_status(returncode: int) -> bool:
+    """True when the process died rather than returning an ordinary error status."""
+    return returncode < 0 or (returncode & 0xFFFFFFFF) >= 0xC0000000
+
+
+def reached_device(result) -> bool:
+    """True when the harness got far enough to print its selected device.
+
+    vk_image_fuzz prints ``device:`` before it creates the shader modules. A fatal exit before that line is startup
+    noise in the loader, validation layer or driver initialization; it cannot be a crash caused by the shader under
+    test, so one retry is sound. A crash after the line can be caused by the module and is never retried.
+    """
+    return any(line.startswith("device:") for line in (result.stdout or "").splitlines())
+
+
 def run_case(fmt_name, width, height, rng, work, build, keep, show, dmask=0xf, data=None, pc_tail=False) -> bool:
     """data: the (texel bytes, T# words) to use instead of drawing them from rng (main draws all cases up front, so
     the translator and the hardware oracle see the same textures)."""
@@ -318,8 +333,13 @@ def run_case(fmt_name, width, height, rng, work, build, keep, show, dmask=0xf, d
     run_kw = {"capture_output": True, "text": True}
     if pc_tail:
         run_kw["env"] = dict(os.environ, LEONIDA_PC_TAIL_UBO="1")
-    r = subprocess.run([harness, os.path.join(spirv, "vs_ids.spv"), os.path.join(spirv, "ps_image_load.spv"),
-                        out_path, spec_path], **run_kw)
+    cmd = [harness, os.path.join(spirv, "vs_ids.spv"), os.path.join(spirv, "ps_image_load.spv"),
+           out_path, spec_path]
+    r = subprocess.run(cmd, **run_kw)
+    if r.returncode not in (0, 77) and fatal_process_status(r.returncode) and not reached_device(r):
+        print(f"{fmt_name} {width}x{height} dmask:0x{dmask:x}: harness startup {exit_status(r.returncode)} "
+              "before device selection; retrying once")
+        r = subprocess.run(cmd, **run_kw)
     if r.returncode == 77:   # a device limit or missing feature, named on the harness's "unsupported:" line
         why = next((ln for ln in f"{r.stdout}\n{r.stderr}".splitlines() if ln.startswith("unsupported:")),
                    "the device does not support the set")

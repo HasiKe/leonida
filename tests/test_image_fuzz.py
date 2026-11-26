@@ -348,6 +348,58 @@ def test_a_silent_crash_still_says_how_the_harness_ended(monkeypatch, tmp_path, 
     assert "FAIL (vk_image_fuzz exit 0xc0000005 (access violation), no output)" in out
 
 
+def run_case_with_harness_sequence(monkeypatch, tmp_path, results):
+    """run_case with vk_image_fuzz returning a sequence of (returncode, stdout, stderr) results."""
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / (imf.HARNESS + (".exe" if os.name == "nt" else ""))).touch()
+    monkeypatch.setattr(imf, "assemble", lambda *_args: None)
+    monkeypatch.setattr(imf, "translate", lambda work: str(tmp_path / "spirv"))
+    monkeypatch.setattr(imf, "read_rgba", lambda _path: [])
+    monkeypatch.setattr(imf, "compare", lambda *_args: [])
+    calls = []
+
+    def run(cmd, **_kw):
+        calls.append(cmd)
+        returncode, stdout, stderr = results[min(len(calls) - 1, len(results) - 1)]
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    monkeypatch.setattr(imf.subprocess, "run", run)
+    result = imf.run_case("R8G8B8A8_UNORM", 4, 4, random.Random(1), str(tmp_path), str(build), False, False)
+    return result, calls
+
+
+def test_a_fatal_predevice_startup_crash_is_retried_once(monkeypatch, tmp_path, capsys):
+    result, calls = run_case_with_harness_sequence(
+        monkeypatch, tmp_path, [(0xC000041D, "", "validation: loader startup\n"), (0, "device: X\n", "")])
+    assert result is True
+    assert len(calls) == 2
+    out = capsys.readouterr().out
+    assert "harness startup exit 0xc000041d before device selection; retrying once" in out
+
+
+def test_a_persistent_predevice_startup_crash_remains_a_harness_error(monkeypatch, tmp_path, capsys):
+    result, calls = run_case_with_harness_sequence(
+        monkeypatch, tmp_path, [(0xC000041D, "", "validation: loader startup\n")])
+    assert result is imf.HARNESS_ERROR
+    assert len(calls) == 2
+    out = capsys.readouterr().out
+    assert "retrying once" in out and "FAIL (vk_image_fuzz exit 0xc000041d" in out
+
+
+def test_a_postdevice_crash_is_not_retried(monkeypatch, tmp_path):
+    result, calls = run_case_with_harness_sequence(
+        monkeypatch, tmp_path, [(0xC0000005, "device: X\n", "pipeline compile\n")])
+    assert result is imf.HARNESS_ERROR
+    assert len(calls) == 1
+
+
+def test_an_ordinary_predevice_error_is_not_retried(monkeypatch, tmp_path):
+    result, calls = run_case_with_harness_sequence(monkeypatch, tmp_path, [(1, "", "spec: bad texture\n")])
+    assert result is imf.HARNESS_ERROR
+    assert len(calls) == 1
+
+
 def test_a_long_stderr_prints_only_its_tail(monkeypatch, tmp_path, capsys):
     stderr = "".join(f"line {i}\n" for i in range(50))
     assert run_case_with_harness_result(monkeypatch, tmp_path, 3, "", stderr) is imf.HARNESS_ERROR
