@@ -52,6 +52,7 @@ from compute_fixture import find_test_program  # noqa: E402
 from hw_oracle import asm as hw_asm, tsharp  # noqa: E402
 
 HARNESS = "vk_image_fuzz"
+HARNESS_ERROR = "harness"   # run_case result: the harness ended before producing results
 DRAW = 64  # the harness draws a 64x64 full-screen triangle
 
 # name -> (Vulkan format for the spec and the image, GFX10 FORMAT code for T# word 1, bytes per texel, model)
@@ -337,7 +338,7 @@ def run_case(fmt_name, width, height, rng, work, build, keep, show, dmask=0xf, d
                                               if len(shown) < len(lines) else "") + ":")
             for line in shown:
                 print(f"    {line}")
-        return False
+        return HARNESS_ERROR
     got = read_rgba(out_path)
     problems = compare(fmt_name, texels, width, height, got, dmask)
     if not problems:
@@ -554,8 +555,8 @@ def self_test() -> int:
 
 
 def run_translator(cases, a, work) -> tuple:
-    """The translator oracle over the cases. Returns (passed, failed, skipped, {case index: True/False/None})."""
-    passed = failed = skipped = 0
+    """The translator oracle over the cases. Returns (passed, failed, skipped, harness errors, verdicts)."""
+    passed = failed = skipped = harness_errors = 0
     verdicts = {}
     pc_tail = bool(getattr(a, "pc_tail_ubo", False))
     for c in cases:
@@ -566,13 +567,17 @@ def run_translator(cases, a, work) -> tuple:
         verdicts[c.index] = result
         if result is None:
             skipped += 1
+        elif result == HARNESS_ERROR:
+            harness_errors += 1
+            print(f"  work dir kept: {work}")
+            break
         elif result:
             passed += 1
         else:
             failed += 1
             print(f"  work dir kept: {work}")
             break
-    return passed, failed, skipped, verdicts
+    return passed, failed, skipped, harness_errors, verdicts
 
 
 def main() -> int:
@@ -663,17 +668,19 @@ def main() -> int:
             return 2
         print(f"work dir {work}")
         if "translator" in backends:
-            passed, failed, skipped, verdicts = run_translator(cases, a, work)
+            passed, failed, skipped, harness_errors, verdicts = run_translator(cases, a, work)
             summary = f"{passed}/{passed + failed} programs that ran match"
             if failed:
                 summary += f"; {failed} mismatched"
             if skipped:
                 summary += f"; {skipped} skipped"
+            if harness_errors:
+                summary += f"; {harness_errors} harness error" + ("s" if harness_errors != 1 else "")
             if unorm8_near:
                 summary += (f"; {unorm8_near} R8G8B8A8_UNORM components one ulp from the exact c / 255 "
                             "(the driver's conversion)")
             print("translator: " + summary)
-            code = 1 if failed else 0
+            code = 2 if harness_errors else (1 if failed else 0)
         if hw_oracle:
             if a.negative_control:
                 return max(code, negative_control(hw_oracle, cases, a))
@@ -683,10 +690,11 @@ def main() -> int:
             if "translator" in backends:
                 for c in failed_cases:
                     seen = verdicts.get(c.index, "not run")
-                    seen = {True: "matches the model", False: "mismatches the model", None: "was skipped"}.get(seen, seen)
+                    seen = {True: "matches the model", False: "mismatches the model", None: "was skipped",
+                            HARNESS_ERROR: "hit a harness error"}.get(seen, seen)
                     print(f"  {c.name}: hardware disagrees with the model; the translator {seen}")
             if any(st["mismatch"] or st["rejected"] for st in stats.values()):
-                code = 1
+                code = max(code, 1)
             if sum(st["match"] for st in stats.values()) == 0:
                 code = max(code, 2)
     finally:
