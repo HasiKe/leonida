@@ -45,6 +45,9 @@ public:
     // memory (an arena VA, a buffer of the layer's).
     using Resolver = bool (*)(void* context, std::uint64_t va, std::uint64_t bytes, std::uint64_t& shader_va);
     using TableScanner = void (*)(void* context, std::uint64_t table_va, std::uint32_t descriptors);
+    // Every binding resolved to a copy of the title's memory: [va, va + bytes) as they are reached at (the device keeps
+    // them for the copy back after the submission, see DeviceState::write_back_titles).
+    using Noter = void (*)(void* context, std::uint64_t va, std::uint64_t bytes);
 
     // [title_va, title_va + bytes) is reached as [shader_va, shader_va + bytes). A range that overlaps a live one
     // replaces it (the title has placed a new buffer over pages it released). False for an empty or wrapping range.
@@ -82,6 +85,19 @@ public:
             generation_.fetch_add(1, std::memory_order_release);
         }
         count_.store(ranges_.size(), std::memory_order_release);
+    }
+
+    // A copy that answered for [title_va, title_va + bytes) at shader_va went, whether or not it had a range here (a
+    // geometry copy that vsharp_address or a placed view reached through GeometryViews directly has none): what was
+    // translated through it is stale. Recorded as a removal would be: the console heaps translate the slots in the
+    // range again (invalidations, changed_ranges), and the GPU key table drops answers into shader_va (take_removed).
+    void forget_copy(std::uint64_t title_va, std::uint64_t bytes, std::uint64_t shader_va) {
+        if (!bytes) return;
+        std::unique_lock lock(mutex_);
+        changes_.record(title_va, bytes);
+        note_removed(shader_va, bytes);
+        invalidations_.fetch_add(1, std::memory_order_release);
+        generation_.fetch_add(1, std::memory_order_release);
     }
 
     // The address a shader must be given for `va` from the ranges added so far: translated inside one, unchanged
@@ -167,6 +183,7 @@ public:
         std::uint64_t to = shader_va(va);
         if (to != va) {
             translated_[kind].fetch_add(1, std::memory_order_relaxed);
+            note_reached(va, bytes);
             return to;
         }
         Resolver resolver;
@@ -178,6 +195,7 @@ public:
         }
         if (!resolver || !resolver(context, va, bytes, to)) return va;
         (to != va ? translated_ : untranslated_)[kind].fetch_add(1, std::memory_order_relaxed);
+        if (to != va) note_reached(va, bytes);
         return to;
     }
 
@@ -185,6 +203,18 @@ public:
     // whether it is in a title range.
     void note(std::uint64_t va, Kind kind) {
         if (va && shader_va(va) != va) untranslated_[kind].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // [va, va + bytes) is reached as a copy of the title's memory: the device keeps it for the copy back.
+    void note_reached(std::uint64_t va, std::uint64_t bytes) {
+        Noter noter;
+        void* context;
+        {
+            std::lock_guard lock(hook_mutex_);
+            noter = noter_;
+            context = hook_context_;
+        }
+        if (noter) noter(context, va, bytes);
     }
 
     // Before a submission: the device rewrites the buffer V#s of the `descriptors` slots the root signature declares
@@ -331,10 +361,16 @@ public:
         hook_context_ = nullptr;
         resolver_ = nullptr;
         scanner_ = nullptr;
+        noter_ = nullptr;
     }
     // The resolver alone, for a device that scans its descriptor tables itself.
     void set_resolver(void* context, Resolver resolver) { set_hooks(context, resolver, nullptr); }
     void clear_resolver(void* context) { clear_hooks(context); }
+    // Set after set_hooks, so the hook (and its context) stays the device's: what reached a copy of the title's memory.
+    void set_noter(Noter noter) {
+        std::lock_guard lock(hook_mutex_);
+        noter_ = noter;
+    }
 
     std::size_t size() const { return count_.load(std::memory_order_acquire); }
     std::uint64_t invalidations() const { return invalidations_.load(std::memory_order_acquire); }
@@ -411,6 +447,7 @@ private:
     BufferMaker maker_ = nullptr;
     Resolver resolver_ = nullptr;
     TableScanner scanner_ = nullptr;
+    Noter noter_ = nullptr;
     void* source_context_ = nullptr;
     DescriptorSource source_ = nullptr;
     std::atomic<std::uint64_t> pulled_{0};
