@@ -945,12 +945,16 @@ if(BUILD_TESTING)
           "--report=${CMAKE_CURRENT_BINARY_DIR}/module-names-results.json")
         set_tests_properties(run_module_names PROPERTIES TIMEOUT 90)
       endif()
-      # TEST-GTA6RT-NO-TLS-CALLBACKS: a thread_local with a destructor gives gta6rt.exe TLS callbacks, and the game
-      # then fast-fails (0xC0000409) in its own _register_thread_local_exe_atexit_callback (RT-XMEM-STARTUP-FASTFAIL).
-      if(Python3_FOUND)
-        add_test(NAME gta6rt_no_tls_callbacks COMMAND "${Python3_EXECUTABLE}" -I
-          "${CMAKE_CURRENT_SOURCE_DIR}/test/check_pe_tls_callbacks.py" "$<TARGET_FILE:gta6rt>")
-      endif()
+    endif()
+
+    # TEST-GTA6RT-NO-TLS-CALLBACKS: a thread_local with a destructor gives gta6rt.exe TLS callbacks, and the game
+    # then fast-fails (0xC0000409) in its own _register_thread_local_exe_atexit_callback (RT-XMEM-STARTUP-FASTFAIL).
+    # The checker only reads the PE file with the host's Python, so unlike run_module_names it is registered for a
+    # cross build too (runtime/cmake/clang-cl-xwin.cmake, same MSVC ABI and UCRT).
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_FOUND)
+      add_test(NAME gta6rt_no_tls_callbacks COMMAND "${Python3_EXECUTABLE}" -I
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/check_pe_tls_callbacks.py" "$<TARGET_FILE:gta6rt>")
     endif()
 
     # pe_loader.cpp needs the shim registry for shims::find/make_unimplemented_thunk. The xmem and d3d12_xs tables
