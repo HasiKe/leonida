@@ -9,6 +9,7 @@
 // An optional final section reads LEONIDA_GAME_DIR and maps the 16 DLLs a retail package ships, without executing
 // any of them or copying any file. It skips when the variable is unset; see test_optional_package.
 #include <windows.h>
+#include <share.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -479,17 +480,30 @@ void test_read_error(const fs::path& dll, const fs::path& temp_dir) {
         return;
     }
 
+    // Some Wine filesystems allow reads even after LockFileEx succeeds. Probe the locked range using the
+    // same CRT sharing mode as the loader so only the unsupported error-path assertions are skipped.
+    std::FILE* probe = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
+    const bool positioned = probe && std::fseek(probe, static_cast<long>(tail), SEEK_SET) == 0;
+    const int byte = positioned ? std::fgetc(probe) : EOF;
+    const bool read_blocked = positioned && std::ferror(probe) != 0;
+    if (probe) std::fclose(probe);
+    check(positioned && (read_blocked || byte == 0), "the fixture probe reaches the locked padding");
+
     rt::Loader loader(temp_dir);
-    bool read_error = false;
-    try {
-        loader.load(path);
-    } catch (const std::runtime_error& error) {
-        read_error = std::string(error.what()).find("cannot read ") != std::string::npos;
+    if (read_blocked) {
+        bool read_error = false;
+        try {
+            loader.load(path);
+        } catch (const std::runtime_error& error) {
+            read_error = std::string(error.what()).find("cannot read ") != std::string::npos;
+        }
+        check(read_error, "a failed PE read after a valid prefix reports an I/O error");
+        check(loader.modules().empty(), "a partial PE read leaves no module behind");
+    } else if (positioned && byte == 0) {
+        std::printf("SKIP locked-tail read error: byte-range lock does not block reads\n");
     }
     check(UnlockFileEx(file, 0, block_size, 0, &lock), "the fixture tail unlocks");
     CloseHandle(file);
-    check(read_error, "a failed PE read after a valid prefix reports an I/O error");
-    check(loader.modules().empty(), "a partial PE read leaves no module behind");
     check(loader.load(path).base != nullptr, "the same PE loads when the complete file can be read");
 }
 
