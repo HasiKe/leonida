@@ -67,7 +67,6 @@
 #include "../src/spirv_f16_halves.h"
 #include "../src/spirv_stores.h"
 #include "../src/title_va_alias.h"
-#include "../src/console_heap_copy.h"
 #include "../src/console_heap_vsharp_slots.h"
 #include "../src/title_window_plan.h"
 #include "../src/vulkan_present.h"
@@ -2862,8 +2861,8 @@ struct DeviceState {
     // another queue's replay that translated its slots before this retirement may still name it. A ticket read here
     // would be one short of this submission, which records its own only after before_execute_ (and with an idle GPU
     // the view would be reaped in this very call).
-    // A retired view's last copy is made here from the title's pages as they are now (GeometryViews::retire_range): a
-    // range the title remapped (xmem's RemapReleases) holds its new bytes, which the refresh below would have copied.
+    // A retired view's last copy is made here from the title's pages as they are now, when they are still readable
+    // (GeometryViews::retire_range).
     // A stream-pool extent it backed leaves pool_spans: the next request for those pages makes a new mapping.
     void drain_geometry_releases() {
         if (!context || !geometry.has_pending_reclaim()) return;
@@ -4188,10 +4187,7 @@ struct DeviceState {
         VkDeviceSize guard = 0;       // null bytes after the GPU copy (heap_guard_bytes/heap_guard_for), its allocation
         bool resource_heap = false;   // a CBV/SRV/UAV heap; a sampler heap's S#s are copied as written
         bool imported = false;
-        // The translated copy shaders read, and its host-RAM mirror (src/console_heap_copy.h): written only through
-        // copy.write()/copy.zero(), read on the CPU only through copy.view().
-        leonida::ConsoleHeapCopy copy;
-        std::uint64_t mirror_checks = 0, mirror_mismatches = 0;  // LEONIDA_HEAP_MIRROR_CHECK, since the last log line
+        std::uint8_t* copy = nullptr;  // writable GPU mirror of the console heap
         // Keep large scratch allocations out of the low addresses the title can use for its heap.
         std::unique_ptr<std::uint8_t, FreeConsoleScratch> scratch;
         std::uint8_t* input{};
@@ -4370,7 +4366,7 @@ struct DeviceState {
         }
         if (empty) heap.empty_slots.insert(std::uint32_t(slot));
         else if (!heap.empty_slots.empty()) heap.empty_slots.erase(std::uint32_t(slot));
-        heap.copy.write(slot * kDescriptorSize, w, kDescriptorSize);
+        std::memcpy(heap.copy + slot * kDescriptorSize, w, kDescriptorSize);
         heap.live_vsharps.set(slot, leonida::ConsoleHeapVsharpSlots::is_live_vsharp(w));
         return settled;
     }
@@ -4418,7 +4414,7 @@ struct DeviceState {
         }();
         const std::size_t end = std::min<std::size_t>(offset + bytes, std::size_t(heap.bytes));
         if (!heap.resource_heap) {
-            heap.copy.write(offset, heap.input + offset, end - offset);
+            std::memcpy(heap.copy + offset, heap.input + offset, end - offset);
             return;
         }
         for (std::size_t at = offset & ~std::size_t(kDescriptorSize - 1); at + kDescriptorSize <= end;
@@ -4438,7 +4434,7 @@ struct DeviceState {
             std::memcpy(&w3, heap.previous + at + 12, sizeof(w3));
             const bool is_buffer_vsharp = !(w3 >> 30);
             if (heap.fix_over && !is_buffer_vsharp) {
-                heap.copy.zero(at, kDescriptorSize);
+                std::memset(heap.copy + at, 0, kDescriptorSize);
                 heap.live_vsharps.clear(slot);
                 ++heap.deferred_fixes;
                 if (!heap.retry[slot]) {
@@ -4531,59 +4527,6 @@ struct DeviceState {
         unbound_tsharp_tracker().note(heap.console_va, offset, words, why);
     }
 
-    // LEONIDA_HEAP_MIRROR=0: no host-RAM mirror of a console heap's copy in the arena (src/console_heap_copy.h); the
-    // release sweep then reads the copy itself, as before the mirror.
-    static bool heap_mirror_enabled() {
-        static const bool on = [] {
-            char value[4] = {};
-            return !(GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR", value, sizeof(value)) == 1 && value[0] == '0');
-        }();
-        return on;
-    }
-    // LEONIDA_HEAP_MIRROR_CHECK=1: the mirror compared with the copy at every release sweep (it reads the whole copy,
-    // so it costs what the mirror saves), the first slots that differ logged.
-    static bool heap_mirror_check_enabled() {
-        static const bool on = [] {
-            char value[4] = {};
-            return GetEnvironmentVariableA("LEONIDA_HEAP_MIRROR_CHECK", value, sizeof(value)) == 1 && value[0] == '1';
-        }();
-        return on;
-    }
-    // The slots whose mirror differs from the copy (0: none, or no mirror); the first few logged, for the first
-    // sweeps that find any.
-    std::size_t check_console_heap_mirror(ConsoleHeap& heap) {  // console_heap_mutex held
-        if (!heap.copy.mirrored()) return 0;
-        constexpr std::size_t kShown = 8;
-        std::vector<std::size_t> slots;
-        const std::size_t count = heap.copy.mismatches(kDescriptorSize, kShown, slots);
-        ++heap.mirror_checks;
-        heap.mirror_mismatches += count;
-        static std::atomic<unsigned> reports{0};
-        if (count && reports.fetch_add(1, std::memory_order_relaxed) < 16) {
-            std::fprintf(stderr, "[rt] d3d12: LEONIDA_HEAP_MIRROR_CHECK: console descriptor heap 0x%llx: %zu slots of "
-                                 "the host mirror differ from the copy\n",
-                         static_cast<unsigned long long>(heap.console_va), count);
-            for (const std::size_t slot : slots) {
-                std::uint32_t mirror[8], copy[8];
-                std::memcpy(mirror, heap.copy.view() + slot * kDescriptorSize, sizeof(mirror));
-                std::memcpy(copy, heap.copy.gpu() + slot * kDescriptorSize, sizeof(copy));
-                std::fprintf(stderr, "[rt] d3d12:   slot %zu: mirror %08x %08x %08x %08x %08x %08x %08x %08x, copy %08x "
-                                     "%08x %08x %08x %08x %08x %08x %08x\n",
-                             slot, mirror[0], mirror[1], mirror[2], mirror[3], mirror[4], mirror[5], mirror[6], mirror[7],
-                             copy[0], copy[1], copy[2], copy[3], copy[4], copy[5], copy[6], copy[7]);
-            }
-        }
-        return count;
-    }
-    // Tests: the mirror of the console heap at `console_va` compared with its copy now. -1: no such heap, or no mirror.
-    long long console_heap_mirror_mismatches(std::uint64_t console_va) {
-        std::lock_guard lock(console_heap_mutex);
-        for (const auto& heap : console_heaps)
-            if (heap->console_va == console_va)
-                return heap->copy.mirrored() ? static_cast<long long>(check_console_heap_mirror(*heap)) : -1;
-        return -1;
-    }
-
     void refresh_console_heap(ConsoleHeap& heap) {  // console_heap_mutex held
         if (heap.imported) return;  // directly imported sampler heap
         if (heap.gpu >= 0) return refresh_console_heap_gpu(heap);
@@ -4594,7 +4537,7 @@ struct DeviceState {
         const auto t0 = clock::now();
         heap.copied += heap.pages->refresh();
         heap.pages->for_each_zeroed([&](std::size_t offset, std::size_t bytes) {
-            heap.copy.zero(offset, bytes);
+            std::memset(heap.copy + offset, 0, bytes);
             std::memset(heap.previous + offset, 0, bytes);
             const auto first = std::uint32_t(offset / kDescriptorSize);
             const auto end = std::uint32_t((offset + bytes) / kDescriptorSize);
@@ -4645,16 +4588,13 @@ struct DeviceState {
             ++heap.rescans;
             const auto rescan_start = clock::now();
             // Even an unchanged title slot may name a buffer released since the last submission.
-            // Walk the host-RAM V# bitset instead of reading every slot of `heap.copy` (which may be uncached WC VRAM),
-            // and read the copy's words from its host-RAM mirror.
-            if (heap_mirror_check_enabled()) check_console_heap_mirror(heap);
-            const std::uint8_t* const translated = heap.copy.view();
+            // Walk the host-RAM V# bitset instead of reading every slot of `heap.copy` (which may be uncached WC VRAM).
             heap.live_vsharps.for_each([&](std::size_t slot) {
                 ++heap.release_candidates;
                 if (filtered) {
                     const auto at = slot * kDescriptorSize;
                     const auto* src = reinterpret_cast<const uint32_t*>(heap.previous + at);
-                    const auto* dst = reinterpret_cast<const uint32_t*>(translated + at);
+                    const auto* dst = reinterpret_cast<const uint32_t*>(heap.copy + at);
                     if (!affected(src, dst) && !affected(src + 4, dst + 4)) return;
                 }
                 ++heap.release_fixes;
@@ -4743,13 +4683,6 @@ struct DeviceState {
                     (unsigned long long)heap->release_fixes, (unsigned long long)heap->release_rebases,
                     (unsigned long long)heap->release_full);
             heap->release_sweeps = heap->release_candidates = heap->release_fixes = heap->release_rebases = heap->release_full = 0;
-            if (heap_mirror_check_enabled() && heap->copy.mirrored())
-                std::fprintf(stderr, "[rt] d3d12: LEONIDA_HEAP_MIRROR_CHECK: console descriptor heap 0x%llx: %llu "
-                                     "checks, %llu slots differing in all\n",
-                             static_cast<unsigned long long>(heap->console_va),
-                             static_cast<unsigned long long>(heap->mirror_checks),
-                             static_cast<unsigned long long>(heap->mirror_mismatches));
-            heap->mirror_checks = heap->mirror_mismatches = 0;
             if (heap->resource_heap) {
                 std::uint64_t paths[kVsharpPathCount];
                 for (unsigned i = 0; i < kVsharpPathCount; ++i)
@@ -4907,7 +4840,7 @@ struct DeviceState {
                     heap->input = heap->scratch.get();
                     heap->previous = heap->scratch.get() + bytes;
                     heap->shader_va = offset;
-                    heap->copy.attach(arena.mapped + offset, std::size_t(bytes), heap_mirror_enabled());
+                    heap->copy = arena.mapped + offset;
                     heap->guard = guard;
                     heap->imported = false;
                     in_arena = true;
@@ -4930,7 +4863,7 @@ struct DeviceState {
             if (heap->scratch) {
                 auto* backing = heap->scratch.get();
                 if (import_console_heap(*heap, reinterpret_cast<std::uintptr_t>(backing), bytes + guard)) {
-                    heap->copy.attach(backing, std::size_t(bytes), false);  // host RAM already: no mirror
+                    heap->copy = backing;
                     heap->guard = guard;
                 }
                 heap->input = backing + bytes + guard;
@@ -4967,10 +4900,9 @@ struct DeviceState {
                              "a heap index past it reads the arena's next bytes; guard MiB",
                              int(guard >> 20));
                 heap->shader_va = offset;
-                // A sampler heap's copy is read by no CPU sweep: no mirror.
-                heap->copy.attach(arena.mapped + offset, std::size_t(bytes), resource_heap && heap_mirror_enabled());
+                heap->copy = arena.mapped + offset;
             }
-            heap->copy.zero(0, std::size_t(bytes + heap->guard));
+            std::memset(heap->copy, 0, std::size_t(bytes + heap->guard));
             if (!heap->input) {
                 heap->mirror.assign(std::size_t(bytes), 0);
                 heap->made.assign(std::size_t(bytes), 0);
@@ -5512,7 +5444,6 @@ struct DeviceState {
             return;
         }
         heap.gpu = index;
-        heap.copy.drop_mirror();  // the pass writes the copy from now on; the CPU neither writes nor reads it
         heap.vsharp_bits.assign((heap.bytes / kDescriptorSize + 63) / 64, 0);
         std::fprintf(stderr, "[rt] d3d12: LEONIDA_CONSOLE_HEAP_GPU: console descriptor heap 0x%llx (%llu slots) is "
                              "translated by the pass (heap %d)\n",
@@ -21065,14 +20996,6 @@ bool read_arena(ID3D12Device* device, std::uint64_t va, void* out, std::size_t b
     if (!d || !d->state().arena.mapped || va > d->state().arena.size || bytes > d->state().arena.size - va) return false;
     std::memcpy(out, d->state().arena.mapped + va, bytes);
     return true;
-}
-
-long long console_heap_mirror_mismatches(ID3D12Device* device, std::uint64_t console_va) {
-    if (!device) return -1;
-    ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(device);
-    if (!real) real = device;
-    Device* d = Device::from<Device>(real);
-    return d ? d->state().console_heap_mirror_mismatches(console_va) : -1;
 }
 
 namespace {

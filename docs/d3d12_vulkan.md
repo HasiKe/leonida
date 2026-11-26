@@ -1737,17 +1737,14 @@ The copies:
     as VIctory keeps its copies of title memory (approach only). In a world run on the RX 7900 XTX the copies held
     4.4-6 GB of VRAM. The cost moves to the bus: the GPU reads every vertex and index of a copy from system memory,
     so a geometry-heavy pass can take longer; measure frame time with and without it before making it a default.
-  - **When a copy goes**: a view is retired when its title range is freed, decommitted or unmapped, and also when a
-    remap gives one of its pages another frame or none (`XMemMapPhysicalPages` with pages, the scatter call,
-    `CopyPageMappingsBatchX`; xmem's `RemapReleases`, `LEONIDA_GEOMETRY_REMAP_RELEASE=0` turns it off): the title
-    streams by remapping its pools' frames, and before this the copies of what those pages held stayed for the
-    device's life (`evicted 0` in every world run). A page mapped again to the frame it had is no change. A retired
+  - **When a copy goes**: a view is retired when its title range is freed, decommitted or unmapped. A remap of
+    physical pages retires nothing: the copies follow the new pages through the refresh. A retired
     view leaves the lookups at once, its alias ranges and translated heap slots are invalidated, its stream-pool
     extent is forgotten, and its memory is freed only after every ExecuteCommandLists replay in progress at the
     retirement has recorded its submissions and those have completed (`kAfterExecutes`). Before it leaves the
-    refresh it is copied once more from its pages if they are readable: a list recorded before a remap that took the
-    view's address (a root view) reads the new bytes, as on the console. The next view of the range makes a new copy.
-    `geometry_views_test` cases 14-16 and `xmem_test` (`test_remap_releases`) cover this without a GPU.
+    refresh it is copied once more from its pages if they are still readable (a heap block freed in memory that
+    stays committed). The next view of the range makes a new copy.
+    `geometry_views_test` cases 14-16 cover this without a GPU.
 - **Which pages changed** since the last refresh: where xmem reserved the title's memory with `MEM_WRITE_WATCH`
   (`XMemVirtualAlloc`'s ordinary regions and the title's `VirtualAlloc` reservations, not placeholders or
   physical-page windows), the kernel says (`GetWriteWatch` with reset, its answers kept for every copy over the page:
