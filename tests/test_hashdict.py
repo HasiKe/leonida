@@ -816,7 +816,7 @@ class OutputPathTest(unittest.TestCase):
                 rc = hashdict.main()
             self.assertEqual(rc, 2, err.getvalue())
             self.assertIn("is one of the inputs", err.getvalue())
-            self.assertFalse(os.path.exists(alias))
+            self.assertEqual(os.listdir(os.path.join(carve, "common")), ["index.json"])
             with open(index, "rb") as f:
                 self.assertEqual(f.read(), original)
 
