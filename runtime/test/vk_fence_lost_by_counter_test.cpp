@@ -6,6 +6,8 @@
 //   3. UINT64_MAX on a fence a Signal asked that value of is the value: no loss, nothing said, no vkDeviceWaitIdle.
 //   4. An ordinary counter value never reaches vkDeviceWaitIdle.
 //   5. The reading does not take the submit lock: a thread holding it (the releaser, mid-submission) cannot stall it.
+//   6. A Signal(UINT64_MAX) announced with QueueHolds::asking but not yet recorded (its Vulkan call still returning
+//      on another thread) makes the reading the value, not a loss.
 // The driver functions are interposed on a real device's table. Skips with exit code 77 when no Vulkan 1.3 device is
 // available. No game data.
 #include "vk_test_device.h"
@@ -130,6 +132,20 @@ int main() {
         EXPECT(driver::idle_calls.load() == 0);
         release.store(true, std::memory_order_release);
         holder.join();
+    }
+    {   // 6: a Signal(UINT64_MAX) in flight: announced before its Vulkan call, not recorded yet
+        VulkanContext context(driver::get_device, d.device, true);
+        EXPECT(context.loaded());
+        VulkanFence fence(context, UINT64_MAX - 1);
+        const unsigned lost_before = device_lost_reports.load();
+        context.holds().asking(fence.semaphore(), UINT64_MAX);
+        EXPECT(context.holds().submitted_value(fence.semaphore()) == UINT64_MAX - 1);  // signaled() not called yet
+        driver::counter_reads_max.store(true, std::memory_order_release);
+        EXPECT(fence.completed() == UINT64_MAX);
+        driver::counter_reads_max.store(false, std::memory_order_release);
+        EXPECT(!context.is_device_lost());
+        EXPECT(device_lost_reports.load() == lost_before);
+        EXPECT(driver::idle_calls.load() == 0);
     }
     std::puts("vk_fence_lost_by_counter: ok");
     return 0;

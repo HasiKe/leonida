@@ -2493,13 +2493,23 @@ public:
             // A lost device can show itself here first: measured on NVIDIA 621.24 and reported on 617.14, the counter
             // query succeeds with UINT64_MAX (and vkWaitSemaphores with a zero timeout succeeds too) before any call
             // has returned VK_ERROR_DEVICE_LOST. The fence's record says whether anyone asked for that value: its
-            // initial value, a CPU Signal or a submitted one (QueueHolds::submitted_value). Asked for, the reading is
-            // the value and nothing is recorded. Not asked for, no Signal can have produced it, so the device is lost.
-            // That is decided without vkDeviceWaitIdle: under the submit lock it can block for minutes on such a
-            // device (measured 270 s on NVIDIA 616.56), and meanwhile the releaser cannot submit the held batch a
+            // initial value, a CPU Signal or a submitted one, including one whose Vulkan call is still returning
+            // (QueueHolds::asked_value: asking() runs before the call). Asked for, the reading is the value and
+            // nothing is recorded. Not asked for, no Signal can have produced it, so the device is lost.
+            // That is decided without vkDeviceWaitIdle first: under the submit lock it can block for minutes on such
+            // a device (measured 270 s on NVIDIA 616.56), and meanwhile the releaser cannot submit the held batch a
             // queue's Wait may be waiting for, so the title froze and the loss was reported minutes late.
-            if (context_.holds().submitted_value(semaphore_) != UINT64_MAX)
-                context_.mark_device_lost("a fence's counter read UINT64_MAX, a value no Signal asked for");
+            if (context_.holds().asked_value(semaphore_) == UINT64_MAX) return value;
+            const bool first = !context_.is_device_lost();
+            context_.mark_device_lost("a fence's counter read UINT64_MAX, a value no Signal asked for");
+            if (first && context_.device_fault()) {
+                // With the fault diagnostics on, vkGetDeviceFaultInfoEXT answered on NVIDIA 621.24 only once a call
+                // had returned VK_ERROR_DEVICE_LOST; vkDeviceWaitIdle is that call when nothing submits afterwards.
+                // The context is lost already, so a long wait here stalls only a diagnostic run.
+                std::lock_guard lock(context_.submit_mutex());
+                context_.observe_result(context_.vk.vkDeviceWaitIdle(context_.device()),
+                                        "vkDeviceWaitIdle (a fence counter of UINT64_MAX)");
+            }
         }
         return value;
     }
@@ -2518,6 +2528,7 @@ public:
         VkSemaphoreSignalInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
         info.semaphore = semaphore_;
         info.value = value;
+        context_.holds().asking(semaphore_, value);  // before the call: a concurrent completed() may see the value
         const VkResult result = context_.observe_result(context_.vk.vkSignalSemaphore(context_.device(), &info),
                                                         "vkSignalSemaphore");
         if (result == VK_ERROR_DEVICE_LOST) context_.mark_device_lost();
@@ -4469,6 +4480,7 @@ private:
                 }
                 ring_at = ring->begin_submit(record);
             }
+            if (signals_fence) context_.holds().asking(fence, value);  // before the call, as VulkanFence::signal
             res = context_.observe_result(context_.queue_submit(queue_, 1, &submit, context_.gpu_labels_.submit_fence(command_buffer)),
                                           "vkQueueSubmit");
             context_.gpu_labels_.submitted(command_buffer, res == VK_SUCCESS);
