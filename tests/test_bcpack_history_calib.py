@@ -1137,7 +1137,12 @@ class PoolSelfCalibrationTest(unittest.TestCase):
                 self.assertEqual(calib.main(["--verify", bad_bc7, "--codec", "bc7"]), 2)
             self.assertIn("ERROR:", err_s.getvalue())
 
-    def test_fit_slices_includes_packed_depth1_mip_in_first_256_blocks(self):
+    def test_fit_slices_fits_a_2d_mip_that_starts_in_the_chunks_first_256_blocks(self):
+        """A 2D mip whose first block lies inside its chunk's first 256 blocks is fitted against its sibling.
+
+        The BC7 top mip starts at block 0 of its own chunk, with its raw packed tail as the child sibling; fit_slices
+        used to skip any 2D mip starting below block 256.
+        """
         import build_dstorage_history as dhist
 
         with tempfile.TemporaryDirectory() as tmp:
