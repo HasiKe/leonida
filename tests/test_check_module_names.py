@@ -54,7 +54,7 @@ class CheckModuleNamesTests(unittest.TestCase):
                 ["--loader", str(root / "missing.exe"), "--guest", str(ok), "--importer", str(ok),
                  "--dependency", str(ok), "--work-dir", str(root / "work")],
             )
-            with mock.patch.object(cmn.os, "name", "nt"):
+            with mock.patch.object(cmn, "_is_windows", return_value=True):
                 for argv in bad_cases:
                     with self.subTest(argv=argv):
                         err = io.StringIO()
@@ -94,7 +94,7 @@ class CheckModuleNamesTests(unittest.TestCase):
                 "--work-dir", str(work),
                 "--report", str(report),
             ]
-            with mock.patch.object(cmn.os, "name", "nt"), \
+            with mock.patch.object(cmn, "_is_windows", return_value=True), \
                     mock.patch.object(cmn.ctypes, "windll", _make_fake_kernel32(), create=True), \
                     mock.patch.object(cmn, "exact_acp", return_value=None), \
                     mock.patch.object(cmn.subprocess, "run", side_effect=fake_run), \
@@ -106,7 +106,7 @@ class CheckModuleNamesTests(unittest.TestCase):
             self.assertTrue(raw.endswith(b"\n"))
             self.assertNotIn(b"\r\n", raw)
 
-            with mock.patch.object(cmn.os, "name", "nt"), \
+            with mock.patch.object(cmn, "_is_windows", return_value=True), \
                     mock.patch.object(cmn.ctypes, "windll", _make_fake_kernel32(), create=True), \
                     mock.patch.object(cmn, "exact_acp", return_value=None), \
                     mock.patch.object(cmn.subprocess, "run", side_effect=OSError("missing binary")), \

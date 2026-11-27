@@ -22,6 +22,10 @@ def exact_acp(text: str) -> bytes | None:
         return None
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def _preflight_paths(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     for name in ("loader", "guest", "importer", "dependency"):
         raw = str(getattr(args, name))
@@ -80,7 +84,7 @@ def _write_report_atomic(path: Path, payload: dict) -> None:
                 shutil.copymode(dest, tmp)
             except FileNotFoundError:
                 pass
-        for delay in (0.01, 0.02, 0.04) if os.name == "nt" else ():
+        for delay in (0.01, 0.02, 0.04) if _is_windows() else ():
             try:
                 os.replace(tmp, dest)
                 return
@@ -103,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
-    if os.name != "nt":
+    if not _is_windows():
         parser.error("this comparison needs native Windows")
     _preflight_paths(args, parser)
     args.work_dir.mkdir(parents=True, exist_ok=True)
