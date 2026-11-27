@@ -251,11 +251,13 @@ class InlineScanCliTests(unittest.TestCase):
             path = os.path.join(tmp, "ok.txt")
             with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("".join(listing("ret")))
-            err = io.StringIO()
-            with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
-                inline_scan.main([path, "--base", "-0x1000"])
-            self.assertEqual(ctx.exception.code, 2)
-            self.assertIn("non-negative", err.getvalue())
+            for bad_args in ([path, "--base=-0x1000"], [path, "--base", "-16"]):
+                with self.subTest(args=bad_args):
+                    err = io.StringIO()
+                    with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                        inline_scan.main(bad_args)
+                    self.assertEqual(ctx.exception.code, 2)
+                    self.assertIn("non-negative", err.getvalue())
 
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.object(inline_scan, "read_lines", side_effect=PermissionError("denied")), \
