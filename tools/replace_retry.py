@@ -23,7 +23,13 @@ def replace(src, dst, *, seconds=None):
     """os.replace(src, dst), retried with a doubling delay for `seconds` (default RETRY_SECONDS) on a transient
     Windows PermissionError; the last error is raised once the time is up."""
     budget = RETRY_SECONDS if seconds is None else seconds
-    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget < 0:
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        raise ValueError(f"seconds must be a finite non-negative number, got {seconds!r}")
+    try:
+        finite = math.isfinite(budget)
+    except OverflowError:
+        finite = False
+    if not finite or budget < 0:
         raise ValueError(f"seconds must be a finite non-negative number, got {seconds!r}")
     deadline = time.monotonic() + budget
     delay = FIRST_DELAY

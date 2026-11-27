@@ -52,6 +52,8 @@ class ReplaceRetryBoundsTests(unittest.TestCase):
             float("inf"),
             float("-inf"),
             -0.5,
+            10**1000,
+            -10**1000,
             True,
             False,
             "1",
