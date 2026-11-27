@@ -207,6 +207,11 @@ skips a shader without `shaderSignedZeroInfNanPreserveFloat32`; needs PR #664's 
 on by itself on Intel's Windows Vulkan driver, whose native mesh draws crash, BUILD-2202, unless `--native-mesh`).
 Each is documented in [docs/design.md](docs/design.md).
 
+`--mesh-serial-waves` is forwarded and saved the same way. It is off by default: with wave64 emulation it runs
+the waves of a mesh shader of more than 64 threads one after the other in 64 invocations instead of side by side
+(docs/design.md, "Mesh shaders with their waves in series"). It changes nothing for shaders translated natively or
+with `--mesh-compute`.
+
 The build records which llvm-mc command and version produced the disassembly. Changing either, or reusing a work
 folder that predates this record, reruns disassembly and translation while keeping the extracted shader inputs.
 
