@@ -519,6 +519,8 @@ def _skin_report(gltf: dict, index: int, skin: dict) -> dict:
         else:
             if accessor.get("type") != "MAT4":
                 issues.append("inverseBindMatrices accessor must have type MAT4")
+            if accessor.get("componentType") != 5126:
+                issues.append("inverseBindMatrices accessor must have componentType FLOAT (5126)")
             count = _accessor_count(gltf, accessor_index)
             if joint_count and (count is None or count < joint_count):
                 issues.append(f"inverseBindMatrices needs at least {joint_count} matrices")

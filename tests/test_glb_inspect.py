@@ -947,5 +947,17 @@ class GlbInspectTests(unittest.TestCase):
                                 for issue in issues))
 
 
+    def test_skin_inverse_bind_matrices_require_float_component_type(self):
+        doc = skinned_gltf()
+        doc["skins"] = [{"joints": [1], "inverseBindMatrices": 4}]
+        doc["accessors"].append({"type": "MAT4", "componentType": 5123, "count": 1})
+        data = glb(doc)
+        report = glb_inspect.build_report(glb_inspect.parse_glb(data), len(data))
+        self.assertEqual(
+            report["skins"][0]["issues"],
+            ["inverseBindMatrices accessor must have componentType FLOAT (5126)"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
