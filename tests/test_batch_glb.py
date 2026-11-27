@@ -281,14 +281,17 @@ class TestBatchGlb(unittest.TestCase):
             fallback = dds_png.dds_to_png_bytes(dds)
             preferred = dds_png.dds_to_png_bytes(_create_minimal_bc1_dds(0x001F))
             (textures / "paint.dds").write_bytes(dds)
-            for png, expected in ((preferred, preferred), (b"", fallback)):
-                with self.subTest(png_available=bool(png)):
+            for label, png, expected, dropped in (
+                ("valid_png", preferred, preferred, []),
+                ("empty_png", b"", fallback, ["paint.png"]),
+                ("truncated_png", preferred[:24], fallback, ["paint.png"]),
+            ):
+                with self.subTest(case=label):
                     (textures / "paint.png").write_bytes(png)
                     stats = batch_glb.batch_convert(str(source), str(out), texture_dir=str(textures))
                     self.assertEqual(stats["succeeded"], 1)
                     self.assertIn(expected, (out / "car.glb").read_bytes())
-                    self.assertEqual([Path(p).name for _, p, _ in stats["dropped_textures"]],
-                                     [] if png else ["paint.png"])
+                    self.assertEqual([Path(p).name for _, p, _ in stats["dropped_textures"]], dropped)
 
     def test_batch_convert_with_dds_texture(self) -> None:
         with tempfile.TemporaryDirectory() as in_dir, \

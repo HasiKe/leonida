@@ -22,9 +22,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import struct
 import sys
 import threading
 import time
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import glb_writer
@@ -52,6 +54,50 @@ def _build_texture_index(texture_dir: str | None) -> dict[str, list[str]]:
     return index
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _validate_png_bytes(data: bytes) -> str | None:
+    if not data:
+        return "the PNG file is empty"
+    if len(data) < 33 or not data.startswith(_PNG_SIGNATURE):
+        return "not a valid PNG header"
+    pos = len(_PNG_SIGNATURE)
+    chunk_idx = 0
+    saw_idat = False
+    while pos < len(data):
+        if pos + 12 > len(data):
+            return "truncated PNG chunk header"
+        length = struct.unpack_from(">I", data, pos)[0]
+        ctype = data[pos + 4:pos + 8]
+        chunk_end = pos + 12 + length
+        if chunk_end > len(data):
+            return f"truncated PNG {ctype.decode('ascii', 'replace')} chunk"
+        expected_crc = struct.unpack_from(">I", data, pos + 8 + length)[0]
+        actual_crc = zlib.crc32(data[pos + 4:pos + 8 + length]) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            return f"bad CRC in PNG {ctype.decode('ascii', 'replace')} chunk"
+        if chunk_idx == 0:
+            if ctype != b"IHDR" or length != 13:
+                return "missing valid PNG IHDR chunk"
+            width, height = struct.unpack_from(">II", data, pos + 8)
+            if width <= 0 or height <= 0:
+                return "PNG IHDR has zero dimension"
+        elif ctype == b"IDAT":
+            saw_idat = True
+        elif ctype == b"IEND":
+            if length != 0:
+                return "non-empty PNG IEND chunk"
+            if chunk_end != len(data):
+                return "trailing data after PNG IEND"
+            if not saw_idat:
+                return "PNG has no IDAT chunk"
+            return None
+        pos = chunk_end
+        chunk_idx += 1
+    return "missing PNG IEND chunk"
+
+
 def _load_png_bytes(tex_path: str, max_size: int = 0) -> tuple[bytes | None, str]:
     """(PNG bytes from file or DDS decode, or None and why it cannot be embedded: a texture the model
     can live without is skipped and reported, never a silent hole in the output)."""
@@ -62,8 +108,9 @@ def _load_png_bytes(tex_path: str, max_size: int = 0) -> tuple[bytes | None, str
                 data = f.read()
         except OSError as exc:
             return None, str(exc)
-        if not data:
-            return None, "the PNG file is empty"
+        err = _validate_png_bytes(data)
+        if err:
+            return None, err
         return data, ""
     elif lower.endswith(".dds"):
         try:
