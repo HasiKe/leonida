@@ -146,5 +146,16 @@ class GenBcpackRuntimeTablesTests(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(tmp)), ["cal.json", "profile.bin"])
 
 
+    def test_generate_bugs_propagate_instead_of_exiting_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_inc = os.path.join(tmp, "out.inc")
+            for exc in (TypeError("internal bug"), KeyError("missing_key")):
+                with self.subTest(exc=type(exc).__name__):
+                    with mock.patch.object(gen, "generate", side_effect=exc):
+                        with self.assertRaises(type(exc)):
+                            gen.main([out_inc])
+                    self.assertFalse(os.path.exists(out_inc))
+
+
 if __name__ == "__main__":
     unittest.main()

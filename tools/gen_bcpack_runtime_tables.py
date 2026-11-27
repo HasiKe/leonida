@@ -157,14 +157,23 @@ def main(argv=None) -> int:
         parser.error("cannot combine positional output with --profile")
     if not args.profile and not args.output:
         parser.error("name the tables file to write, or use --profile")
-    try:
-        if args.profile:
+    if args.profile:
+        try:
             write_profile(*args.profile)
-        else:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
+            print(f"gen_bcpack_runtime_tables: {e}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            _validate_output_path(args.output, "output")
+        except ValueError as e:
+            print(f"gen_bcpack_runtime_tables: {e}", file=sys.stderr)
+            return 2
+        try:
             _atomic_write(args.output, generate, binary=False, label="output")
-    except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
-        print(f"gen_bcpack_runtime_tables: {e}", file=sys.stderr)
-        return 2
+        except OSError as e:
+            print(f"gen_bcpack_runtime_tables: {e}", file=sys.stderr)
+            return 2
     return 0
 
 
