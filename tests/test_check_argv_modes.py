@@ -49,7 +49,7 @@ class CheckArgvModesTests(unittest.TestCase):
                 ["--loader", str(loader), "--fixtures", str(fixtures), "--work-dir", str(work), "--report", str(blocker / "rep.json")],
                 ["--loader", str(loader), "--fixtures", str(fixtures), "--work-dir", str(work), "--report", "  "],
             )
-            with mock.patch.object(cam.os, "name", "nt"):
+            with mock.patch.object(cam, "_is_windows", return_value=True):
                 for argv in bad_cases:
                     with self.subTest(argv=argv):
                         err = io.StringIO()
@@ -68,7 +68,7 @@ class CheckArgvModesTests(unittest.TestCase):
 
     def test_strip_env_keys_case_insensitive_on_windows_and_atomic_report(self) -> None:
         env = {"leonida_game_dir": "X", "Leonida_Argv_Sequence": "1", "KEEP": "yes"}
-        with mock.patch.object(cam.os, "name", "nt"):
+        with mock.patch.object(cam, "_is_windows", return_value=True):
             cam._strip_env_keys(env, ("LEONIDA_GAME_DIR", "LEONIDA_ARGV_SEQUENCE"))
         self.assertEqual(env, {"KEEP": "yes"})
 
@@ -116,7 +116,7 @@ class CheckArgvModesTests(unittest.TestCase):
                     extra += "game exited with code 0\n"
                 return subprocess.CompletedProcess(cmd, 0, stdout=(head + extra).encode("utf-8"), stderr=b"")
 
-            with mock.patch.object(cam.os, "name", "nt"), \
+            with mock.patch.object(cam, "_is_windows", return_value=True), \
                     mock.patch.object(cam.ctypes, "windll", _fake_windll(), create=True), \
                     mock.patch.dict(cam.os.environ, {"leonida_game_dir": "OLD", "Leonida_Argv_Sequence": "99"}, clear=False), \
                     mock.patch.object(cam.subprocess, "run", side_effect=fake_run), \

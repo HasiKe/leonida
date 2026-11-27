@@ -42,9 +42,13 @@ def run(executable, command, cwd, environment):
     }
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def _strip_env_keys(environment, names):
     """Remove environment keys (case-insensitively on Windows)."""
-    if os.name == "nt":
+    if _is_windows():
         targets = {name.upper() for name in names}
         for key in list(environment):
             if key.upper() in targets:
@@ -100,7 +104,7 @@ def _write_report_atomic(path: Path, payload: dict) -> None:
                 shutil.copymode(dest, tmp)
             except FileNotFoundError:
                 pass
-        for delay in (0.01, 0.02, 0.04) if os.name == "nt" else ():
+        for delay in (0.01, 0.02, 0.04) if _is_windows() else ():
             try:
                 os.replace(tmp, dest)
                 return
@@ -131,7 +135,7 @@ def main(argv=None) -> int:
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--report", type=Path, help="optional retained JSON evidence")
     args = parser.parse_args(argv)
-    if os.name != "nt":
+    if not _is_windows():
         parser.error("this native MSVC startup comparison requires Windows")
     _preflight_paths(args, parser)
     loader = args.loader.resolve(strict=True)
