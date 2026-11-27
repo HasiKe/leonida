@@ -3394,8 +3394,16 @@ void apply_deferred_waits(ListProxy* self) {
 
 // write64 with flag 1 (the GPU's timestamp) or 2 (the system's): the GPU takes its timestamp here, at the write's
 // place in the list (the title's GPU timing reads these back: a begin/end pair must be its work's, not one landing
-// time). Without the device's timestamp heap the write lands the CPU's clock, as before.
+// time). Without the device's timestamp heap the write lands the CPU's clock, as before. So does a write recorded
+// after the list's Close: the closed real list refuses the EndQuery and the resolve, which marks the whole list bad
+// and ExecuteCommandLists then refuses it (measured in a retail boot: the title stopped submitting after it).
 void take_timestamp(ListProxy* self, list_values::Write& write) {
+    if (self->real_closed) {
+        static std::atomic<unsigned> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+            std::fprintf(stderr, "[rt] d3d12_xs: a timestamp write after the list's Close takes the CPU's clock\n");
+        return;
+    }
     DeviceProxy* device = self->device;
     std::shared_ptr<list_values::Timestamps> stamps;
     {

@@ -4629,6 +4629,24 @@ int check_list_values_more() {
     set_cell(24, 1);
     EXPECT(xs::list_values_idle(3000));
 
+    // 9b. A timestamp write after the list's Close records nothing in the closed real list (its EndQuery and resolve
+    // would be refused, and the list with them) and lands the CPU's clock; the list still executes.
+    EXPECT(hr_of(raw(direct, 139, word(allocator), 0)) == S_OK);
+    raw(direct, 14, 1, 1, 1);
+    EXPECT(hr_of(raw(direct, 9)) == S_OK);
+    const unsigned closed_end_queries = direct_real->calls[53], closed_resolves = direct_real->calls[54];
+    const std::uint64_t cpu_before = xs::list_value_stats().stamps_cpu;
+    raw(direct, 72, word(&g_cells2[30]), 0, 0, 1);  // after Close
+    EXPECT(direct_real->calls[53] == closed_end_queries && direct_real->calls[54] == closed_resolves);
+    g_queue_call_count = 0;
+    EXPECT(submit(qa, direct) == 0);
+    const std::uint64_t after_close = logged_signal(qa_mock, a_written);
+    EXPECT(after_close);
+    fence_signal(a_written, after_close);
+    for (int i = 0; i < 2000 && cell2(30) == 0; ++i) Sleep(1);
+    EXPECT(cell2(30) != 0 && xs::list_value_stats().stamps_cpu == cpu_before + 1);
+    EXPECT(xs::list_values_idle(3000));
+
     // 10. A GPU wait for a label a CPU job of the title's writes later never blocks the submitting thread: the
     // submission returns at once with the gate held (with a 5 s timeout), a submission behind it on the same queue
     // returns at once too, and the CPU job's write (on another thread, 100 ms later) opens the gate.
