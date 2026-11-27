@@ -508,7 +508,7 @@ def _validate_skins(gltf, reader, warnings, errors):
             for index, row in enumerate(values):
                 bad += sum(1 for value in row if not math.isfinite(value))
                 # glTF stores MAT4 columns consecutively; translation is in the last column.
-                if (first_non_affine is None and index < len(joints) and meta["type"] == "MAT4"
+                if (first_non_affine is None and meta["type"] == "MAT4"
                         and row[3::4] != (0.0, 0.0, 0.0, 1.0)):
                     first_non_affine = index
             if first_non_affine is not None:

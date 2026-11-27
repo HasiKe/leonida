@@ -449,12 +449,7 @@ class GlbSkinningTests(unittest.TestCase):
         doc, binary, _ = glb_skinning.parse_glb(make_glb(ibm_count=3))
         skin = doc["skins"][0]
         doc["skins"].append({"joints": [0], "inverseBindMatrices": skin["inverseBindMatrices"]})
-        # A trailing finite matrix that no joint uses need not have the affine fourth row.
-        accessor = doc["accessors"][skin["inverseBindMatrices"]]
-        offset = doc["bufferViews"][accessor["bufferView"]]["byteOffset"]
-        payload = bytearray(binary)
-        struct.pack_into("<f", payload, offset + 2 * 64 + 15 * 4, 0.5)
-        path = self.write("shared.glb", build_glb(doc, payload))
+        path = self.write("shared.glb", build_glb(doc, binary))
         output = self.dir / "shared.json"
         proc = self.run_tool(path, "--json", output)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -462,6 +457,19 @@ class GlbSkinningTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual([(s["joint_count"], s["inverse_bind_matrices"]["count"])
                           for s in report["skins"]], [(2, 3), (1, 3)])
+
+    def test_surplus_inverse_bind_matrix_requires_affine_fourth_row(self):
+        doc, binary, _ = glb_skinning.parse_glb(make_glb(ibm_count=3))
+        accessor = doc["accessors"][doc["skins"][0]["inverseBindMatrices"]]
+        offset = doc["bufferViews"][accessor["bufferView"]]["byteOffset"]
+        payload = bytearray(binary)
+        struct.pack_into("<f", payload, offset + 2 * 64 + 3 * 4, 0.5)
+        report = glb_skinning.analyze_glb(build_glb(doc, payload))
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "inverseBindMatrices[2] fourth row must be [0, 0, 0, 1]",
+            "\n".join(report["errors"]),
+        )
 
     def test_inverse_bind_matrices_count_mismatch(self):
         report = glb_skinning.analyze_glb(make_glb(ibm_count=1))
