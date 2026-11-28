@@ -18,7 +18,7 @@ BIN chunk, 4-byte padding), then checks every skin and every mesh primitive:
 
 Missing optional fields are reported as null; they are never filled in with a
 guess. A malformed container, a file with no skin, or a skin whose
-inverseBindMatrices count differs from its joint count exits nonzero. Structural
+inverseBindMatrices count is smaller than its joint count exits nonzero. Structural
 problems also exit nonzero with a one-line ``ERROR:`` message.
 
 Each joint's inverse bind matrix must have the affine fourth row (0, 0, 0, 1).
@@ -498,10 +498,10 @@ def _validate_skins(gltf, reader, warnings, errors):
                 "component_type": meta["component_type"],
                 "normalized": meta["normalized"],
             })
-            if meta["count"] != len(joints):
+            if meta["count"] < len(joints):
                 errors.append(
                     f"{_skin_label(skin_index, name)}: inverseBindMatrices count "
-                    f"{meta['count']} != joint count {len(joints)}"
+                    f"{meta['count']} is below joint count {len(joints)}"
                 )
             if meta["type"] != "MAT4":
                 errors.append(
@@ -522,7 +522,7 @@ def _validate_skins(gltf, reader, warnings, errors):
             for index, row in enumerate(values):
                 bad += sum(1 for value in row if not math.isfinite(value))
                 # glTF stores MAT4 columns consecutively; translation is in the last column.
-                if (first_non_affine is None and index < len(joints) and meta["type"] == "MAT4"
+                if (first_non_affine is None and meta["type"] == "MAT4"
                         and row[3::4] != (0.0, 0.0, 0.0, 1.0)):
                     first_non_affine = index
             if first_non_affine is not None:
