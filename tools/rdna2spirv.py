@@ -1994,9 +1994,10 @@ class Gen:
         lane-local VALU instructions goes inside one `if (active)` and writes its VGPRs directly: the driver
         then predicates it with its own EXEC, instead of keeping the old and new value of every register live for
         an OpSelect per write. Only in a shader that may write EXEC (elsewhere %active stays true and the driver
-        folds the selects away), and not under --wave64-emulate, whose rounds split blocks at instruction
-        boundaries."""
-        local = [self.exec_changes and not self.emulate and self.lane_local(i) for i in seq]
+        folds the selects away). Under --wave64-emulate a round ends a segment only at a cross-lane exchange, a
+        barrier or a memory-ordering point (x_split), and a lane-local instruction is none of these, so a run sits
+        inside one segment; insns checks that no x_split happened inside it."""
+        local = [self.exec_changes and self.lane_local(i) for i in seq]
         i = 0
         while i < len(seq):
             j = i
@@ -2012,10 +2013,16 @@ class Gen:
             self.emit(f"OpBranchConditional {act} {do} {end}")
             self.emit(f"{do} = OpLabel")
             self.active_run = True
+            marks = len(self.x_marks)
             for ins in seq[i:j]:
                 start = len(self.body)
                 self.insn(ins)
                 self.check_lane_local(ins, self.body[start:])
+                if len(self.x_marks) != marks:   # a segment boundary would cut the `if (active)` in two
+                    # An internal invariant, not an unsupported pattern: lane_local() admitted an instruction that
+                    # ends a segment. The corpus loop counts it as a translator error for this one shader.
+                    raise AssertionError(f"internal: {ins['op']} split an emulated wave64 round inside an active "
+                                         "run (lane_local admitted a segment boundary)")
             self.active_run = False
             self.emit(f"OpBranch {end}")
             self.emit(f"{end} = OpLabel")
