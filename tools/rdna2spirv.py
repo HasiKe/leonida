@@ -7069,6 +7069,15 @@ class Gen:
         # f16 destination under default MODE (denorm16_64=3): omod ignored by silicon, clamp kept.
         return self.clamp_mods(v, mods, allow_omod=False)
 
+    def clamp_f16_bits(self, h):
+        """Apply DX10 clamp to an already rounded half in the low 16 bits of a %uint."""
+        zero, capped, out = self.tmp(), self.tmp(), self.tmp()
+        # As unsigned words, all negative halves (including -0) and all positive NaNs exceed +inf.
+        self.emit(f"{zero} = OpUGreaterThan %bool {h} {self.cu(0x7C00)}")
+        self.emit(f"{capped} = OpExtInst %uint %glsl UMin {h} {self.cu(0x3C00)}")
+        self.emit(f"{out} = OpSelect %uint {zero} {self.cu(0)} {capped}")
+        return out
+
     def _validate_unary_f16(self, op, raw_op, a, mods):
         """Validate operands, encoding suffix, and modifiers for unary f16 VOP1/VOP3/SDWA ops."""
         if len(a) != 2:
@@ -7925,13 +7934,16 @@ class Gen:
         zero = self.cu(0)
         src0 = self.tmp()
         self.emit(f"{src0} = OpSelect %uint {src_ok} {shuffled} {zero}")
-        src0 = self.modify(src0, src)
+        if base_op(ins["op"]) == "v_cvt_f32_f16":
+            # Pass the modifiers through the lane select so the conversion applies them to the half source.
+            args[first] = {**src, "k": "ssa", "v": src0}
+        else:
+            args[first] = {"k": "ssa", "v": self.modify(src0, src)}
         if dpp8 is not None or bound:
             write = enabled
         else:
             write = self.tmp()
             self.emit(f"{write} = OpLogicalAnd %bool {enabled} {src_ok}")
-        args[first] = {"k": "ssa", "v": src0}
         if compare:
             # Every lane is enabled and an invalid source reads 0 (checked above), so the compare's own EXEC guard
             # is the only one: the mask write is the plain compare's (for v_cmpx, EXEC's).
@@ -8178,10 +8190,7 @@ class Gen:
             x = self.src_f(a[1])
             h = self.f16_omod(self.f16_res(x), mods)
             if "clamp" in mods:
-                v2, f = self.tmp(), self.tmp()
-                self.emit(f"{v2} = OpExtInst %v2float %glsl UnpackHalf2x16 {h}")
-                self.emit(f"{f} = OpCompositeExtract %float {v2} 0")
-                h = self.f16_bits(self.clamp_mods(f, ["clamp"]))     # exact: the clamped value is an f16
+                h = self.clamp_f16_bits(h)
             self.write_lo16(a[0], h)
         elif op == "s_mulk_i32":
             v = a[1]["v"] & 0xFFFF
@@ -10649,21 +10658,8 @@ class Gen:
                 self.emit(f"{r4} = OpSelect %uint {nan1} {s1} {r3}")
                 self.emit(f"{r5} = OpSelect %uint {nan2} {s2} {r4}")
                 if has_clamp:
-                    v2f, fv = self.tmp(), self.tmp()
-                    self.emit(f"{v2f} = OpExtInst %v2float %glsl UnpackHalf2x16 {r5}")
-                    self.emit(f"{fv} = OpCompositeExtract %float {v2f} 0")
-                    self.f16_out(a[0], self.clamp_f16(fv, mods), dhi)
-                elif not dhi:
-                    self.write_lo16(a[0], r5)
-                else:
-                    if a[0]["k"] != "vgpr":
-                        raise Unsupported("op_sel destination")
-                    old, keep, sh16, v = (self.tmp() for _ in range(4))
-                    self.emit(f"{old} = OpCopyObject %uint {self.load_reg('vgpr', a[0]['r'])}")
-                    self.emit(f"{keep} = OpBitwiseAnd %uint {old} {self.cu(0xFFFF)}")
-                    self.emit(f"{sh16} = OpShiftLeftLogical %uint {r5} {self.cu(16)}")
-                    self.emit(f"{v} = OpBitwiseOr %uint {keep} {sh16}")
-                    self.dst(a[0], v)
+                    r5 = self.clamp_f16_bits(r5)
+                self.write_half16(a[0], r5, dhi)
             else:
                 d = a[0]
                 if d["k"] != "vgpr" or d.get("n") != 2:
@@ -11517,27 +11513,31 @@ class Gen:
             lo = self.tmp()
             self.emit(f"{lo} = OpBitwiseAnd %uint {r} {self.cu(0xFFFF)}")
             if "clamp" in mods and op in ("v_frexp_mant_f16", "v_ldexp_f16"):
-                s15, e16, frac16, is_exp31, is_nan, is_zero_out, gt_one, c1, clamped_lo = \
-                    (self.tmp() for _ in range(9))
-                self.emit(f"{s15} = OpBitFieldUExtract %uint {lo} {self.cu(15)} {self.cu(1)}")
-                is_neg = self.tmp_bool_nz(s15)
-                self.emit(f"{e16} = OpBitFieldUExtract %uint {lo} {self.cu(10)} {self.cu(5)}")
-                self.emit(f"{is_exp31} = OpIEqual %bool {e16} {self.cu(31)}")
-                self.emit(f"{frac16} = OpBitwiseAnd %uint {lo} {self.cu(0x3FF)}")
-                has_frac = self.tmp_bool_nz(frac16)
-                self.emit(f"{is_nan} = OpLogicalAnd %bool {is_exp31} {has_frac}")
-                self.emit(f"{is_zero_out} = OpLogicalOr %bool {is_neg} {is_nan}")
-                self.emit(f"{gt_one} = OpUGreaterThan %bool {lo} {self.cu(0x3C00)}")
-                self.emit(f"{c1} = OpSelect %uint {gt_one} {self.cu(0x3C00)} {lo}")
-                self.emit(f"{clamped_lo} = OpSelect %uint {is_zero_out} {self.cu(0)} {c1}")
-                lo = clamped_lo
+                lo = self.clamp_f16_bits(lo)
             self.write_half16(a[0], lo, dhi)
         elif op == "v_cvt_f32_f16":
-            u = self.src_h(a[1])
-            v2, f = self.tmp(), self.tmp()
-            self.emit(f"{v2} = OpExtInst %v2float %glsl UnpackHalf2x16 {u}")
-            self.emit(f"{f} = OpCompositeExtract %float {v2} 0")
-            self.dst(a[0], self.tou(self.clamp_mods(self.modify_f(f, a[1]), mods)))
+            f, h, const_nan = self.f16_in_bits(a[1])
+            v = self.tou(self.clamp_mods(f, mods))
+            if const_nan is not False:
+                # Under IEEE=0 the conversion preserves the modified sign and full payload, including the
+                # quiet bit (tools/f32_fuzz.py). Keep these bits out of the driver's float arithmetic.
+                nan_bits = self.cu(0)
+                if "clamp" not in mods:
+                    sign, sign32, mant, mant32, base, nan_bits = (self.tmp() for _ in range(6))
+                    self.emit(f"{sign} = OpBitwiseAnd %uint {h} {self.cu(0x8000)}")
+                    self.emit(f"{sign32} = OpShiftLeftLogical %uint {sign} {self.cu(16)}")
+                    self.emit(f"{mant} = OpBitwiseAnd %uint {h} {self.cu(0x3FF)}")
+                    self.emit(f"{mant32} = OpShiftLeftLogical %uint {mant} {self.cu(13)}")
+                    self.emit(f"{base} = OpBitwiseOr %uint {sign32} {self.cu(0x7F800000)}")
+                    self.emit(f"{nan_bits} = OpBitwiseOr %uint {base} {mant32}")
+                if const_nan:
+                    v = nan_bits
+                else:
+                    is_nan = self._f16_half_nan(h)
+                    out = self.tmp()
+                    self.emit(f"{out} = OpSelect %uint {is_nan} {nan_bits} {v}")
+                    v = out
+            self.dst(a[0], v)
         elif op in ("v_interp_p1_f32", "v_interp_p2_f32", "v_interp_mov_f32"):
             # Single-lane model: the barycentric p1/p2 pair yields the interpolated attribute, and the mov of P0
             # the provoking vertex's value. An input only ever read through the mov is declared Flat: such
