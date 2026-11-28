@@ -603,6 +603,10 @@ def decode_one(buf, pos, end, addr):
             ins.unknown, ins.mnem = True, f"vexmap{omap}"
             ins.size = pos - start
             return ins
+        if not vex["evex"] and omap in (2, 3):
+            bmi = _decode_vex_bmi(buf, pos, end, ins, start, vex, op, addr)
+            if bmi is not None:
+                return bmi
         return _finish(buf, pos, end, ins, start, f"v{op:02x}", spec[1], state, addr, opcode_byte)
 
     if op == 0x0F:
@@ -766,6 +770,75 @@ def _finish_group(buf, pos, end, ins, start, group, opspec, state, addr, opcode_
         if o[0] == "m" and o[1]["rip"]:
             o[1]["abs"] = ins.addr + ins.size + o[1]["disp"]
     _classify(ins, mnem, opcode_byte & 0xF, state)
+    return ins
+
+
+_BMI_FLAGS = {
+    "andn": "NZCV",
+    "blsr": "NZCV",
+    "blsmsk": "NZCV",
+    "blsi": "NZCV",
+    "bextr": "NZCV",
+    "bzhi": "NZCV",
+}
+FLAG_WRITERS.update(_BMI_FLAGS)
+
+
+def _decode_vex_bmi(buf, pos, end, ins, start, vex, op, addr):
+    """Decode VEX.LZ BMI1 (andn/blsr/blsmsk/blsi/bextr) and BMI2 (bzhi/pext/pdep/mulx/shlx/sarx/shrx/rorx)."""
+    # All 13 BMI1/BMI2 VEX encodings use 3-byte C4 (map 2 or 3) with VEX.L == 0.
+    if (buf[pos - 2] >> 2) & 1:
+        return None
+    omap, pp, vvvv = vex["map"], vex["pp"], vex["vvvv"]
+    sz = 8 if vex["w"] else 4
+
+    if omap == 2:
+        if op == 0xF2 and pp == 0:
+            kind_op = "andn"
+        elif op == 0xF3 and pp == 0:
+            kind_op = "grp_f3"
+        elif op == 0xF5 and pp in (0, 2, 3):
+            kind_op = {0: "bzhi", 2: "pext", 3: "pdep"}[pp]
+        elif op == 0xF6 and pp == 3:
+            kind_op = "mulx"
+        elif op == 0xF7 and pp in (0, 1, 2, 3):
+            kind_op = {0: "bextr", 1: "shlx", 2: "sarx", 3: "shrx"}[pp]
+        else:
+            return None
+    elif omap == 3 and op == 0xF0 and pp == 3 and vvvv == 0:
+        kind_op = "rorx"
+    else:
+        return None
+
+    reg_field, rm_make, pos, _ = _modrm(buf, pos, end, vex["r"], vex["x"], vex["b"], True)
+    if kind_op == "grp_f3":
+        reg7 = reg_field & 7
+        mnem = {1: "blsr", 2: "blsmsk", 3: "blsi"}.get(reg7)
+        if mnem is None:
+            ins.unknown, ins.mnem, ins.size = True, f"vex_f3_{reg7}", pos - start
+            return ins
+        ops = (("r", vvvv, sz), rm_make(sz))
+    elif kind_op == "rorx":
+        imm, pos = _read_imm(buf, pos, end, 1, signed=False)
+        mnem = "rorx"
+        ops = (("r", reg_field, sz), rm_make(sz), ("i", imm, 1))
+    elif kind_op in ("andn", "pdep", "pext", "mulx"):
+        mnem = kind_op
+        ops = (("r", reg_field, sz), ("r", vvvv, sz), rm_make(sz))
+    else:
+        mnem = kind_op
+        ops = (("r", reg_field, sz), rm_make(sz), ("r", vvvv, sz))
+
+    ins.mnem = mnem
+    ins.ops = ops
+    ins.size = pos - start
+    ins.rexw = vex["w"]
+    for o in ins.ops:
+        if o[0] == "m" and o[1]["rip"]:
+            o[1]["abs"] = ins.addr + ins.size + o[1]["disp"]
+    ins.kind = "bmi"
+    ins.flags_w = _BMI_FLAGS.get(mnem, "")
+    ins.flags_r = ""
     return ins
 
 
@@ -1489,6 +1562,193 @@ class FunctionTranslator:
                 else:
                     a.li(GTMP, disp)
                     a.add_r(rd, rd, GTMP)
+
+    def _emit_bmi(self, ins):
+        """Emit BMI1 (andn/blsr/blsmsk/blsi/bextr) and BMI2 (bzhi/shlx/sarx/shrx/rorx/mulx/pdep/pext)."""
+        a = self.asm
+        m = ins.mnem
+        sz = self._op_size(ins.ops[0])
+        sf = 1 if sz == 8 else 0
+        w = 64 if sf else 32
+        need = self.needed.get(ins.addr, set())
+        mat = ins.addr in self.mat
+
+        if m == "andn":
+            dst, src1, src2 = ins.ops
+            self._load(ins, src2, T0)
+            a.mov(T1, GMAP[src1[1]], sf=sf)
+            a.bic_r(T2, T0, T1, sf=sf)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            if need or mat:
+                a.ands_r(31, T2, T2, sf=sf)
+                if mat:
+                    self._stash_res(ins, T2)
+                    self._mkflags(0)
+            return
+
+        if m in ("blsr", "blsmsk", "blsi"):
+            dst, src = ins.ops
+            self._load(ins, src, T0)
+            if m == "blsr":
+                a.sub(T1, T0, 1, sf=sf)
+                a.and_r(T2, T0, T1, sf=sf)
+            elif m == "blsmsk":
+                a.sub(T1, T0, 1, sf=sf)
+                a.eor_r(T2, T0, T1, sf=sf)
+            else:
+                a.sub_r(T1, 31, T0, sf=sf)
+                a.and_r(T2, T0, T1, sf=sf)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            if need or mat:
+                a.ands_r(31, T2, T2, sf=sf)
+                if "C" in need or mat:
+                    a.mrs_nzcv(T1)
+                    a.cmp(T0, 0, sf=sf)
+                    a.cset(T3, "ne" if m == "blsi" else "eq", sf=0)
+                    a.bfi(T1, T3, 29, 1)
+                    a.msr_nzcv(T1)
+                if mat:
+                    self._stash_res(ins, T2)
+                    self._mkflags(0)
+            return
+
+        if m == "bextr":
+            dst, src, ctrl = ins.ops
+            self._load(ins, src, T0)
+            g_ctrl = GMAP[ctrl[1]]
+            a.uxtb(T1, g_ctrl)
+            a.ubfx(T3, g_ctrl, 8, 8, sf=0)
+            zero_lbl, join_lbl = self._skip_lbl(), self._skip_lbl()
+            a.cmp(T1, w, sf=0)
+            a.bcond("cs", zero_lbl)
+            a.cbz(T3, zero_lbl, sf=0)
+            a.lsrv(T2, T0, T1, sf=sf)
+            a.cmp(T3, w, sf=0)
+            a.bcond("cs", join_lbl)
+            a.movz(GTMP, 1, 0, sf=sf)
+            a.lslv(GTMP, GTMP, T3, sf=sf)
+            a.sub(GTMP, GTMP, 1, sf=sf)
+            a.and_r(T2, T2, GTMP, sf=sf)
+            a.b(join_lbl)
+            a.label(zero_lbl)
+            a.movz(T2, 0, 0, sf=1)
+            a.label(join_lbl)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            if need or mat:
+                a.ands_r(31, T2, T2, sf=sf)
+                if mat:
+                    self._stash_res(ins, T2)
+                    self._mkflags(0)
+            return
+
+        if m == "bzhi":
+            dst, src, idx = ins.ops
+            self._load(ins, src, T0)
+            a.uxtb(T1, GMAP[idx[1]])
+            full_lbl, join_lbl = self._skip_lbl(), self._skip_lbl()
+            a.cmp(T1, w, sf=0)
+            a.bcond("cs", full_lbl)
+            a.movz(T3, 1, 0, sf=sf)
+            a.lslv(T3, T3, T1, sf=sf)
+            a.sub(T3, T3, 1, sf=sf)
+            a.and_r(T2, T0, T3, sf=sf)
+            a.movz(GTMP, 0, 0, sf=0)
+            a.b(join_lbl)
+            a.label(full_lbl)
+            a.mov(T2, T0, sf=sf)
+            a.movz(GTMP, 1, 0, sf=0)
+            a.label(join_lbl)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            if need or mat:
+                a.ands_r(31, T2, T2, sf=sf)
+                if "C" in need or mat:
+                    a.mrs_nzcv(T1)
+                    a.bfi(T1, GTMP, 29, 1)
+                    a.msr_nzcv(T1)
+                if mat:
+                    self._stash_res(ins, T2)
+                    self._mkflags(0)
+            return
+
+        if m in ("shlx", "sarx", "shrx"):
+            dst, src, cnt = ins.ops
+            self._load(ins, src, T0)
+            g_dst, g_cnt = GMAP[dst[1]], GMAP[cnt[1]]
+            if m == "shlx":
+                a.lslv(g_dst, T0, g_cnt, sf=sf)
+            elif m == "sarx":
+                a.asrv(g_dst, T0, g_cnt, sf=sf)
+            else:
+                a.lsrv(g_dst, T0, g_cnt, sf=sf)
+            return
+
+        if m == "rorx":
+            dst, src, imm_op = ins.ops
+            self._load(ins, src, T0)
+            c = imm_op[1] & (w - 1)
+            if c == 0:
+                a.mov(GMAP[dst[1]], T0, sf=sf)
+            else:
+                a.ror(GMAP[dst[1]], T0, c, sf=sf)
+            return
+
+        if m == "mulx":
+            hi, lo, src = ins.ops
+            self._load(ins, src, T0)
+            if sf:
+                a.mul(T1, GMAP[2], T0, sf=1)
+                a.umulh(T2, GMAP[2], T0)
+            else:
+                a.umaddl(T1, GMAP[2], T0, 31)
+                a.lsr(T2, T1, 32, sf=1)
+            a.mov(GMAP[lo[1]], T1, sf=sf)
+            a.mov(GMAP[hi[1]], T2, sf=sf)
+            return
+
+        if m == "pdep":
+            dst, src, mask = ins.ops
+            self._load(ins, mask, T0)
+            a.mov(T1, GMAP[src[1]], sf=sf)
+            a.movz(T2, 0, 0, sf=1)
+            loop_lbl, done_lbl = self._skip_lbl(), self._skip_lbl()
+            a.label(loop_lbl)
+            a.cbz(T0, done_lbl, sf=sf)
+            a.sub_r(T3, 31, T0, sf=sf)
+            a.and_r(T3, T0, T3, sf=sf)
+            a.and_i(GTMP, T1, 1, sf=1)
+            a.sub_r(GTMP, 31, GTMP, sf=1)
+            a.and_r(GTMP, GTMP, T3, sf=sf)
+            a.orr_r(T2, T2, GTMP, sf=sf)
+            a.lsr(T1, T1, 1, sf=sf)
+            a.eor_r(T0, T0, T3, sf=sf)
+            a.b(loop_lbl)
+            a.label(done_lbl)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            return
+
+        if m == "pext":
+            dst, src, mask = ins.ops
+            self._load(ins, mask, T0)
+            a.mov(T1, GMAP[src[1]], sf=sf)
+            a.movz(T2, 0, 0, sf=1)
+            a.movz(ADDR_T, 1, 0, sf=1)
+            loop_lbl, skip_lbl, done_lbl = self._skip_lbl(), self._skip_lbl(), self._skip_lbl()
+            a.label(loop_lbl)
+            a.cbz(T0, done_lbl, sf=sf)
+            a.sub_r(T3, 31, T0, sf=sf)
+            a.and_r(T3, T0, T3, sf=sf)
+            a.and_r(GTMP, T1, T3, sf=sf)
+            a.cbz(GTMP, skip_lbl, sf=sf)
+            a.orr_r(T2, T2, ADDR_T, sf=sf)
+            a.label(skip_lbl)
+            a.lsl(ADDR_T, ADDR_T, 1, sf=sf)
+            a.eor_r(T0, T0, T3, sf=sf)
+            a.b(loop_lbl)
+            a.label(done_lbl)
+            a.mov(GMAP[dst[1]], T2, sf=sf)
+            return
+
+        raise UnhandledInsn(ins, f"bmi {m}")
 
     def _stash_res(self, ins, res_reg):
         need = self.needed.get(ins.addr, set())
@@ -2334,6 +2594,8 @@ class FunctionTranslator:
             self._emit_branch(ins)
         elif k == "call":
             self._emit_call(ins)
+        elif k == "bmi":
+            self._emit_bmi(ins)
         elif k == "ret":
             self._emit_ret(ins)
         elif k == "leave":
