@@ -450,8 +450,13 @@ def main(argv=None) -> int:
                 f.write("\n; --- llvm-mc messages ---\n; " + err.strip().replace("\n", "\n; ") + "\n")
 
     if work:
-        if a.backend in ("llvm-mc", "auto"):
+        if a.backend == "llvm-mc":
             disasm.probe(a.mcpu)
+        elif a.backend == "auto":
+            try:
+                disasm.probe(a.mcpu)
+            except SystemExit:
+                a.backend = "python"
         with ThreadPoolExecutor(a.jobs) as ex:   # each job waits on its own llvm-mc process
             list(ex.map(one, work))
 

@@ -405,8 +405,13 @@ def main():
                 pending.append(path)
         files = pending
     if files:
-        if a.backend in ("llvm-mc", "auto"):
+        if a.backend == "llvm-mc":
             probe(a.mcpu)
+        elif a.backend == "auto":
+            try:
+                probe(a.mcpu)
+            except SystemExit:
+                a.backend = "python"
         with ThreadPoolExecutor(a.jobs) as ex:
             res.update(ex.map(lambda p: one(p, out, a.mcpu, backend=a.backend), files))
     print(f"{total} shaders -> {os.path.abspath(out)}: {dict(res)}")
