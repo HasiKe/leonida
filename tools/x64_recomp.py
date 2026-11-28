@@ -467,6 +467,8 @@ def _classify(ins, mnem, cc_index, state):
     elif mnem in ("push", "pushseg", "pushf"):
         ins.kind = "push"
         ins.flags_r = FLAG_READERS.get(mnem, "")
+    elif mnem in ("movbe", "crc32"):
+        ins.kind = "misc"
     elif mnem in ("pop", "popseg", "popf"):
         ins.kind = "pop"
         ins.flags_w = "NZCVPA" if mnem == "popf" else ""
@@ -614,7 +616,23 @@ def decode_one(buf, pos, end, addr):
                 raise DecodeError("truncated 0F38")
             opcode_byte = buf[pos]
             pos += 1
-            spec = ("simd", "V W")
+            if opcode_byte in (0xF0, 0xF1):
+                if rep == "f2":
+                    dst_s = "Gq" if rexw else "Gd"
+                    if opcode_byte == 0xF0:
+                        spec = ("crc32", f"{dst_s} Eb")
+                    else:
+                        src_s = "Eq" if rexw else ("Ew" if opsize else "Ed")
+                        spec = ("crc32", f"{dst_s} {src_s}")
+                elif rep == "" and pos < end and (buf[pos] >> 6) != 3:
+                    sz_c = "q" if rexw else ("w" if opsize else "d")
+                    spec = ("movbe", f"G{sz_c} M{sz_c}" if opcode_byte == 0xF0 else f"M{sz_c} G{sz_c}")
+                else:
+                    _, _, pos, _ = _modrm(buf, pos, end, rexr, rexx, rexb, has_rex)
+                    ins.unknown, ins.mnem, ins.size = True, f"op0f38_{opcode_byte:02x}", pos - start
+                    return ins
+            else:
+                spec = ("simd", "V W")
         elif op == 0x3A:
             if pos >= end:
                 raise DecodeError("truncated 0F3A")
@@ -1081,6 +1099,9 @@ class Asm:
 
     def rorv(self, rd, rn, rm, sf=1):
         self.emit((0x9AC02C00 if sf else 0x1AC02C00) | rm << 16 | rn << 5 | rd)
+
+    def rev16(self, rd, rn, sf=0):
+        self.emit((0xDAC00400 if sf else 0x5AC00400) | rn << 5 | rd)
 
     # multiply/divide
     def madd(self, rd, rn, rm, ra, sf=1):
@@ -1576,6 +1597,49 @@ class FunctionTranslator:
                 a.label(skip)
             return
         raise UnhandledInsn(None, f"ctx cc {cc}")  # type: ignore
+
+    def _emit_movbe(self, ins):
+        if len(ins.ops) != 2 or not (
+            (ins.ops[0][0] == "r" and ins.ops[1][0] == "m")
+            or (ins.ops[0][0] == "m" and ins.ops[1][0] == "r")
+        ):
+            raise UnhandledInsn(ins, "invalid movbe operands")
+        a = self.asm
+        dst, src = ins.ops
+        sz = self._op_size(dst)
+        self._load(ins, src, T0)
+        if sz == 2:
+            a.rev16(T0, T0, sf=0)
+        elif sz in (4, 8):
+            a.rev(T0, T0, 1 if sz == 8 else 0)
+        else:
+            raise UnhandledInsn(ins, f"movbe size {sz}")
+        self._store(ins, dst, T0)
+
+    def _emit_crc32(self, ins):
+        if len(ins.ops) != 2 or ins.ops[0][0] != "r":
+            raise UnhandledInsn(ins, "invalid crc32 operands")
+        a = self.asm
+        dst, src = ins.ops
+        src_sz = self._op_size(src)
+        if src_sz not in (1, 2, 4, 8):
+            raise UnhandledInsn(ins, f"crc32 size {src_sz}")
+        g = GMAP[dst[1]]
+        self._load(ins, src, T1)
+        a.mov(T0, g, sf=0)
+        a.eor_r(T0, T0, T1, sf=1)
+        a.li(T1, 0x82F63B78)
+        a.movz(T2, src_sz * 8, 0, sf=0)
+        loop_lbl = self._skip_lbl()
+        a.label(loop_lbl)
+        a.and_i(T3, T0, 1, sf=1)
+        a.sub_r(T3, 31, T3, sf=1)
+        a.and_r(T3, T3, T1, sf=1)
+        a.lsr(T0, T0, 1, sf=1)
+        a.eor_r(T0, T0, T3, sf=1)
+        a.sub(T2, T2, 1, sf=0)
+        a.cbnz(T2, loop_lbl, sf=0)
+        a.mov(g, T0, sf=0)
 
     # -- integer ops -------------------------------------------------------------
     def _emit_alu(self, ins):
@@ -2248,6 +2312,10 @@ class FunctionTranslator:
             self._emit_lea(ins)
         elif k == "alu":
             self._emit_alu(ins)
+        elif m == "movbe":
+            self._emit_movbe(ins)
+        elif m == "crc32":
+            self._emit_crc32(ins)
         elif k in ("push", "pop"):
             self._emit_pushpop(ins)
         elif k == "xchg":
