@@ -6342,9 +6342,15 @@ class Gen:
             # Redirect absent source lanes before the shuffle: even a masked undefined result is undefined.
             self.emit(f"{ex} = OpGroupNonUniformBallotBitExtract %bool %c3 {bal} {src}")
             self.emit(f"{safe_src} = OpSelect %uint {ex} {src} {self_lane}")
+            # Both shuffles are stored (SHADER-PERMUTE-EAGER). Each is used once, and so is every link of the
+            # chain, so SPIRV-Cross would write the 32 steps as one nested ternary, hit31 ? data31 : (hit30 ? ...),
+            # under the EXEC ternary of the write: a lane that takes an outer arm, or is off, would run none of the
+            # shuffles inside it, and the lanes that read from it get 0 or a stale word (Apple M5, MoltenVK 1.4.2).
             self.emit(f"{shv} = OpGroupNonUniformShuffle %uint %c3 {tp} {safe_src}")
+            shv = self.eager("%uint", shv)
             self.emit(f"{v} = OpSelect %uint {ex} {shv} {self.cu(0)}")
             self.emit(f"{shd} = OpGroupNonUniformShuffle %uint %c3 {dat} {safe_src}")
+            shd = self.eager("%uint", shd)
             self.emit(f"{hit} = OpIEqual %bool {v} {mine}")
             self.emit(f"{nxt} = OpSelect %uint {hit} {shd} {acc}")
             acc = nxt
