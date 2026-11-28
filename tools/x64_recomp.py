@@ -2061,27 +2061,31 @@ class FunctionTranslator:
 
     def _parity_jcc(self, ins, lbl):
         a = self.asm
-        a.ldur(T0, CTX_REG, CTX_RES, size=8)
-        a.eor_shift(T0, T0, T0, 1, 4, sf=0)
-        a.eor_shift(T0, T0, T0, 1, 2, sf=0)
-        a.eor_shift(T0, T0, T0, 1, 1, sf=0)
-        a.tst_i(T0, 1, sf=0)
-        a.bcond("eq" if ins.cc == "p" else "ne", lbl)
+        prod = self.arm_path.get(ins.addr)
+        if prod is None or prod.mnem in ("popf", "sahf") or prod.addr in self.mat:
+            a.ldr(T2, CTX_REG, CTX_EFLAGS, size=4)
+            (a.tbnz if ins.cc == "p" else a.tbz)(T2, 2, lbl)
+            return
+        a.ldur(T2, CTX_REG, CTX_RES, size=8)
+        a.eor_shift(T2, T2, T2, 1, 4, sf=0)
+        a.eor_shift(T2, T2, T2, 1, 2, sf=0)
+        a.eor_shift(T2, T2, T2, 1, 1, sf=0)
+        (a.tbz if ins.cc == "p" else a.tbnz)(T2, 0, lbl)
 
     def _ctx_jcc(self, cc, lbl):
         a = self.asm
-        a.ldr(T0, CTX_REG, CTX_EFLAGS, size=4)
-        self._ctx_jcc_reg(cc, T0, lbl)
+        a.ldr(T2, CTX_REG, CTX_EFLAGS, size=4)
+        self._ctx_jcc_reg(cc, T2, lbl)
 
     def _ctx_jcc_reg(self, cc, w, lbl):
         a = self.asm
-        simple = {"e": (EF_ZF, "ne"), "ne": (EF_ZF, "eq"), "b": (EF_CF, "ne"),
-                  "ae": (EF_CF, "eq"), "s": (EF_SF, "ne"), "ns": (EF_SF, "eq"),
-                  "o": (EF_OF, "ne"), "no": (EF_OF, "eq"), "p": (EF_PF, "ne"),
-                  "np": (EF_PF, "eq")}
+        simple = {"e": (6, True), "ne": (6, False), "b": (0, True),
+                  "ae": (0, False), "s": (7, True), "ns": (7, False),
+                  "o": (11, True), "no": (11, False), "p": (2, True),
+                  "np": (2, False)}
         if cc in simple:
-            a.tst_i(w, simple[cc][0], sf=0)
-            a.bcond(simple[cc][1], lbl)
+            bit, want_set = simple[cc]
+            (a.tbnz if want_set else a.tbz)(w, bit, lbl)
             return
         if cc in ("be", "a"):
             a.tst_i(w, EF_CF | EF_ZF, sf=0)
@@ -2989,6 +2993,8 @@ def emit_rt(a: Asm, table_va, bare_metal=False, ctx_va=None):
     a.lsl(3, 3, 6)
     a.orr_r(2, 2, 3)
     a.ubfx(3, 1, 28, 1)
+    a.cmp(0, 2, sf=0)
+    a.csel(3, 31, 3, "eq", sf=0) # kind==logic -> OF=0
     a.lsl(3, 3, 11)
     a.orr_r(2, 2, 3)
     a.ubfx(3, 1, 29, 1)          # arm C
@@ -3013,7 +3019,7 @@ def emit_rt(a: Asm, table_va, bare_metal=False, ctx_va=None):
     a.eor_r(3, 3, 4)
     a.and_i(3, 3, 0x10, sf=0)
     a.orr_r(2, 2, 3)
-    a.str(2, CTX_REG, CTX_EFLAGS, size=4)
+    a.str(2, CTX_REG, CTX_EFLAGS, size=8)
     a.msr_nzcv(5)
     a.ret(LINK)
     if bare_metal:
