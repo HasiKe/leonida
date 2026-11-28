@@ -411,6 +411,19 @@ class TestFolder(unittest.TestCase):
         self.assertIn("ambiguous name", r.stdout)
         self.assertIn("1", r.stdout.split("ambiguous name")[1].split()[0])
 
+    def test_cli_checks_operation_specific_csv_headers_before_tagging(self):
+        original = Path(self.opus, "story", "bank_01", "0ABCDEF1.ogg").read_bytes()
+        path = Path(self.tmp.name, "header_only.csv")
+        for header, args, required in [
+                ("bank,stream_id,name", ["--names", str(path), "--source", "story"], "source"),
+                ("label,text_en", ["--names", self.names, "--dialogue", str(path)], "wave")]:
+            with self.subTest(required=required):
+                path.write_text(header + "\n", encoding="utf-8", newline="\n")
+                proc = subprocess.run([sys.executable, "-I", TOOL, self.opus, *args], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(required, proc.stderr)
+                self.assertEqual(Path(self.opus, "story", "bank_01", "0ABCDEF1.ogg").read_bytes(), original)
+
     def test_cli_checks_the_names_header_even_without_rows(self):
         path = Path(self.names)
         for header, code in (("", 2), ("wave,text_en", 2), ("bank,stream_id,name", 0)):
