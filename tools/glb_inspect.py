@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 import errno
+import io
 import json
 import os
 import struct
@@ -112,11 +113,15 @@ def _reject_json_constant(value: str) -> None:
 
 def parse_glb(data: bytes) -> dict:
     """Validate the GLB container and return the parsed JSON and chunk table."""
-    size = len(data)
-    if size < GLB_HEADER_SIZE:
-        raise GlbError(f"truncated GLB header: {size} bytes, need at least {GLB_HEADER_SIZE}")
+    return _parse_stream(io.BytesIO(data), len(data))
 
-    magic, version, declared_length = struct.unpack_from("<4sII", data, 0)
+
+def _parse_stream(stream, size: int) -> dict:
+    header = stream.read(GLB_HEADER_SIZE)
+    if len(header) < GLB_HEADER_SIZE:
+        raise GlbError(f"truncated GLB header: {len(header)} bytes, need at least {GLB_HEADER_SIZE}")
+
+    magic, version, declared_length = struct.unpack("<4sII", header)
     if magic != GLB_MAGIC:
         raise GlbError(f"bad GLB magic {magic!r}, expected {GLB_MAGIC!r}")
     if version != GLB_VERSION:
@@ -132,9 +137,10 @@ def parse_glb(data: bytes) -> dict:
     offset = GLB_HEADER_SIZE
     chunks: list[dict] = []
     while offset < size:
-        if offset + CHUNK_HEADER_SIZE > size:
+        chunk_header = stream.read(CHUNK_HEADER_SIZE)
+        if len(chunk_header) != CHUNK_HEADER_SIZE:
             raise GlbError(f"truncated chunk header at offset {offset}")
-        chunk_length, chunk_type = struct.unpack_from("<II", data, offset)
+        chunk_length, chunk_type = struct.unpack("<II", chunk_header)
         remaining = size - offset - CHUNK_HEADER_SIZE
         label = _chunk_type_name(chunk_type)
         if chunk_length > remaining:
@@ -146,13 +152,16 @@ def parse_glb(data: bytes) -> dict:
             raise GlbError(f"{label} chunk at offset {offset} has length {chunk_length}, not a multiple of 4")
         chunks.append({"type": chunk_type, "length": chunk_length})
         offset += CHUNK_HEADER_SIZE + chunk_length
+        stream.seek(offset)
 
     if not chunks or chunks[0]["type"] != CHUNK_TYPE_JSON:
         kind = _chunk_type_name(chunks[0]["type"]) if chunks else "none"
         raise GlbError(f"missing JSON chunk: first chunk is {kind}")
 
-    json_offset = GLB_HEADER_SIZE + CHUNK_HEADER_SIZE
-    json_payload = data[json_offset:json_offset + chunks[0]["length"]]
+    stream.seek(GLB_HEADER_SIZE + CHUNK_HEADER_SIZE)
+    json_payload = stream.read(chunks[0]["length"])
+    if len(json_payload) != chunks[0]["length"]:
+        raise GlbError("truncated JSON chunk")
     pad_start = len(json_payload.rstrip(b" \x00"))
     padding = len(json_payload) - pad_start
     nul_padding = json_payload[pad_start:].count(b"\x00")
@@ -656,8 +665,12 @@ def format_report(report: dict) -> str:
 
 def inspect_file(path: str) -> dict:
     with open(path, "rb") as handle:
-        data = handle.read()
-    return build_report(parse_glb(data), len(data))
+        if not handle.seekable():
+            data = handle.read()
+            return build_report(parse_glb(data), len(data))
+        size = handle.seek(0, os.SEEK_END)
+        handle.seek(0)
+        return build_report(_parse_stream(handle, size), size)
 
 
 def main(argv: list[str] | None = None) -> int:
