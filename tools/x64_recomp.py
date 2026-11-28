@@ -1220,6 +1220,15 @@ class Asm:
         assert 0 <= off < 4096 * size and off % size == 0
         self.emit(base | (off // size) << 10 | rn << 5 | rt)
 
+    def ldaxr(self, rt, rn, size=8):
+        base = {1: 0x085FFC00, 2: 0x485FFC00, 4: 0x885FFC00, 8: 0xC85FFC00}[size]
+        self.emit(base | rn << 5 | rt)
+
+    def stlxr(self, rs, rt, rn, size=8):
+        assert rs != rt and rs != rn
+        base = {1: 0x0800FC00, 2: 0x4800FC00, 4: 0x8800FC00, 8: 0xC800FC00}[size]
+        self.emit(base | rs << 16 | rn << 5 | rt)
+
     def ldur(self, rt, rn, off, size=8):
         base = {1: 0x38400000, 2: 0x78400000, 4: 0xB8400000, 8: 0xF8400000}[size]
         assert -256 <= off <= 255
@@ -1523,6 +1532,202 @@ class FunctionTranslator:
             a.str(src, ADDR_T, 0, size=self._op_size(op))
         else:
             raise UnhandledInsn(ins, f"store {op}")
+
+    _LOCK_ALU_OPS = frozenset({
+        "add", "adc", "and", "sub", "sbb", "or", "xor", "inc", "dec", "neg", "not",
+    })
+
+    def _emit_lock_alu(self, ins):
+        """Emit LOCK-prefixed memory RMW ALU ops using ARMv8.0 LDAXR/STLXR loops.
+
+        The LL/SC loop computes only the new value using non-flag-setting instructions
+        so incoming CF (for adc/sbb, captured into GTMP before the loop) and prior
+        NZCV (for not, inc/dec CF preservation, and retries) stay intact across retries.
+        Flags are computed once after the atomic store commits.
+        """
+        a = self.asm
+        m = ins.mnem
+        dst = ins.ops[0]
+        sz = self._op_size(dst)
+        sf = 1 if sz == 8 else 0
+        mask = (1 << (sz * 8)) - 1 if sz < 8 else 0xFFFFFFFFFFFFFFFF
+        need = self.needed.get(ins.addr, set())
+        mat = ins.addr in self.mat
+        flaggy = m != "not" and (bool(need) or mat)
+
+        # Load source operand into T1 BEFORE computing EA (T1 stays read-only across retries).
+        if len(ins.ops) == 2:
+            src = ins.ops[1]
+            if src[0] == "i":
+                v = src[1] & mask
+                if v == 0xFFFFFFFFFFFFFFFF:
+                    a.movn(T1, 0)
+                else:
+                    a.li(T1, v)
+            else:
+                self._load(ins, src, T1)
+        elif m in ("inc", "dec"):
+            a.movz(T1, 1, 0, sf=0)
+
+        # Compute EA into ADDR_T BEFORE capturing incoming CF into GTMP (_mem_addr may clobber GTMP).
+        self._mem_addr(dst[1], ADDR_T)
+
+        # For adc/sbb, capture original incoming x86 CF (0 or 1) into GTMP before retries.
+        if m in ("adc", "sbb"):
+            prod = self.arm_path.get(ins.addr)
+            if prod is not None:
+                if prod.mnem in LOGIC_KIND:
+                    a.movz(GTMP, 0, 0, sf=0)
+                else:
+                    a.mrs_nzcv(GTMP)
+                    a.ubfx(GTMP, GTMP, 29, 1)
+                    if prod.mnem in SUB_KIND:
+                        a.eor_i(GTMP, GTMP, 1, sf=0)
+            else:
+                a.ldr(GTMP, CTX_REG, CTX_EFLAGS, size=4)
+                a.and_i(GTMP, GTMP, EF_CF, sf=0)
+
+        def _compute_value():
+            if m == "add":
+                a.add_r(T2, T0, T1, sf=sf)
+            elif m == "sub":
+                a.sub_r(T2, T0, T1, sf=sf)
+            elif m == "and":
+                a.and_r(T2, T0, T1, sf=sf)
+            elif m == "or":
+                a.orr_r(T2, T0, T1, sf=sf)
+            elif m == "xor":
+                a.eor_r(T2, T0, T1, sf=sf)
+            elif m == "inc":
+                a.add(T2, T0, 1, sf=sf)
+            elif m == "dec":
+                a.sub(T2, T0, 1, sf=sf)
+            elif m == "neg":
+                a.sub_r(T2, 31, T0, sf=sf)
+            elif m == "not":
+                a.mvn(T2, T0, sf=sf)
+            elif m == "adc":
+                a.add_r(T2, T0, T1, sf=sf)
+                a.add_r(T2, T2, GTMP, sf=sf)
+            else:  # sbb
+                a.sub_r(T2, T0, T1, sf=sf)
+                a.sub_r(T2, T2, GTMP, sf=sf)
+
+        retry_lbl = self._skip_lbl()
+        if sz > 1:
+            unaligned_lbl = self._skip_lbl()
+            done_lbl = self._skip_lbl()
+            # Guard ARMv8.0 LDAXR/STLXR alignment without touching NZCV.
+            a.and_i(T0, ADDR_T, sz - 1)
+            a.cbnz(T0, unaligned_lbl)
+
+            a.label(retry_lbl)
+            a.ldaxr(T0, ADDR_T, size=sz)
+            _compute_value()
+            a.stlxr(T3, T2, ADDR_T, size=sz)
+            a.cbnz(T3, retry_lbl, sf=0)
+            a.b(done_lbl)
+
+            a.label(unaligned_lbl)
+            a.ldr(T0, ADDR_T, 0, size=sz)
+            _compute_value()
+            a.str(T2, ADDR_T, 0, size=sz)
+            a.label(done_lbl)
+        else:
+            a.label(retry_lbl)
+            a.ldaxr(T0, ADDR_T, size=1)
+            _compute_value()
+            a.stlxr(T3, T2, ADDR_T, size=1)
+            a.cbnz(T3, retry_lbl, sf=0)
+
+        if not flaggy:
+            return
+
+        if sz == 1:
+            a.uxtb(T2, T2)
+        elif sz == 2:
+            a.uxth(T2, T2)
+
+        if "A" in need or mat:
+            if m == "neg":
+                a.stur(31, CTX_REG, CTX_A, size=8)
+                a.stur(T0, CTX_REG, CTX_B, size=8)
+            else:
+                a.stur(T0, CTX_REG, CTX_A, size=8)
+                a.stur(T1, CTX_REG, CTX_B, size=8)
+        self._stash_res(ins, T2)
+
+        sh = (32 - sz * 8) if sz < 4 else 0
+        if m in ("and", "or", "xor"):
+            if sh:
+                a.lsl(T2, T2, sh, sf=0)
+            a.ands_r(31, T2, T2, sf=sf)
+            self._maybe_mkflags(ins)
+            return
+
+        if m in ("add", "sub"):
+            if sh:
+                a.lsl(T0, T0, sh, sf=0)
+                a.lsl(T1, T1, sh, sf=0)
+            (a.adds_r if m == "add" else a.subs_r)(31, T0, T1, sf=sf)
+            self._maybe_mkflags(ins)
+            return
+
+        if m == "neg":
+            if sh:
+                a.lsl(T0, T0, sh, sf=0)
+            a.subs_r(31, 31, T0, sf=sf)
+            self._maybe_mkflags(ins)
+            return
+
+        if m in ("inc", "dec"):
+            a.mrs_nzcv(GTMP)
+            a.ubfx(GTMP, GTMP, 29, 1)
+            if sh:
+                a.lsl(T0, T0, sh, sf=0)
+                a.movz(T1, 1 << (sh - 16), 1, sf=0)
+                (a.adds_r if m == "inc" else a.subs_r)(31, T0, T1, sf=0)
+            else:
+                (a.adds if m == "inc" else a.subs)(31, T0, 1, sf=sf)
+            a.mrs_nzcv(T3)
+            a.bfi(T3, GTMP, 29, 1)
+            a.msr_nzcv(T3)
+            if mat:
+                a.ldur(GTMP, CTX_REG, CTX_EFLAGS, size=8)
+                self._mkflags(0)
+                a.ldur(T0, CTX_REG, CTX_EFLAGS, size=8)
+                a.bfi(T0, GTMP, 0, 1)
+                a.stur(T0, CTX_REG, CTX_EFLAGS, size=8)
+            return
+
+        # adc / sbb: GTMP holds incoming x86 CF (0 or 1).
+        if sh:
+            a.lsl(T0, T0, sh, sf=0)
+            a.lsl(T1, T1, sh, sf=0)
+            a.sub_r(T3, 31, GTMP, sf=0)          # 0 if cf==0 else 0xFFFFFFFF
+            a.lsr(T3, T3, 32 - sh, sf=0)         # low sh bits filled iff cf==1
+            if m == "adc":
+                a.orr_r(T0, T0, T3, sf=0)
+                a.lsl(T3, GTMP, 29)
+                a.msr_nzcv(T3)
+                a.adcs(31, T0, T1, sf=0)
+            else:
+                a.orr_r(T1, T1, T3, sf=0)
+                a.eor_i(T3, GTMP, 1, sf=0)
+                a.lsl(T3, T3, 29)
+                a.msr_nzcv(T3)
+                a.sbcs(31, T0, T1, sf=0)
+        else:
+            if m == "adc":
+                a.lsl(T3, GTMP, 29)
+                a.msr_nzcv(T3)
+                a.adcs(31, T0, T1, sf=sf)
+            else:
+                a.eor_i(T3, GTMP, 1, sf=0)
+                a.lsl(T3, T3, 29)
+                a.msr_nzcv(T3)
+                a.sbcs(31, T0, T1, sf=sf)
+        self._maybe_mkflags(ins)
 
     def _mem_addr(self, m, rd):
         a = self.asm
@@ -2568,6 +2773,8 @@ class FunctionTranslator:
         k, m = ins.kind, ins.mnem
         if k == "mov":
             self._emit_mov(ins)
+        elif k == "alu" and ins.lock and ins.ops and ins.ops[0][0] == "m" and m in self._LOCK_ALU_OPS:
+            self._emit_lock_alu(ins)
         elif k == "lea":
             self._emit_lea(ins)
         elif k == "alu":
