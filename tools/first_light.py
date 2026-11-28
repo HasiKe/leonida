@@ -693,7 +693,7 @@ def rgba_probes_for_mesh(
 
 
 def check_image(data: bytes, manifest: dict) -> dict:
-    """The readback oracle: exact shape, coverage window, a clear corner and the centre UV.
+    """The readback oracle: exact shape, finite channels, coverage, a clear corner and the centre UV.
 
     tests/test_first_light.py imports this function, so the test and ``--check`` agree.
     """
@@ -718,6 +718,8 @@ def check_image(data: bytes, manifest: dict) -> dict:
             f"raw is {len(data)} bytes, expected {width * height * 16}"
         )
     pixels = struct.unpack(f"<{len(data) // 4}f", data)
+    if not all(map(math.isfinite, pixels)):
+        raise AssertionError("raw readback contains a non-finite channel")
     clear_val = manifest.get("clear", CLEAR)
     textured = (
         manifest.get("texture") is not None
