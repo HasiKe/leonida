@@ -266,9 +266,9 @@ class DecodeError(Exception):
 
 
 def _vsize(opsize, rexw):
-    if opsize:
-        return 2
-    return 8 if rexw else 4
+    if rexw:
+        return 8
+    return 2 if opsize else 4
 
 
 def _size_of(letter, opsize, rexw):
@@ -590,7 +590,7 @@ def decode_one(buf, pos, end, addr):
     ins.rexw, ins.has_rex = rexw, has_rex
     ins.addrsize = addrsize
 
-    state = {"opsize": opsize, "rexw": rexw, "rexr": rexr, "rexx": rexx, "rexb": rexb,
+    state = {"opsize": 0 if rexw else opsize, "rexw": rexw, "rexr": rexr, "rexx": rexx, "rexb": rexb,
              "has_rex": has_rex, "vex": vex}
 
     op = b0
