@@ -190,6 +190,14 @@ class KeptServer:
         except (OSError, subprocess.TimeoutExpired):
             return None
 
+    def _warmup(self) -> None:
+        env = dict(os.environ, WINEDLLOVERRIDES=merge_dll_overrides(os.environ.get("WINEDLLOVERRIDES")))
+        try:
+            subprocess.run(self.wine + ["wineboot"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, env=env, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            pass                          # the tests start the services then, as without a kept server
+
     def __enter__(self):
         if not self.command:
             self.note = "no wineserver found: each test starts its own"
@@ -200,18 +208,14 @@ class KeptServer:
                 code = self._run("-p")
             else:
                 self.note = "a wineserver already runs for this prefix: used and left running"
+                self._warmup()
                 return self
         self.started = code == 0
         if not self.started:
             self.note = f"could not start {self.command} -p: each test starts its own server"
             return self
         self.note = "wineserver kept alive for the run"
-        env = dict(os.environ, WINEDLLOVERRIDES=merge_dll_overrides(os.environ.get("WINEDLLOVERRIDES")))
-        try:
-            subprocess.run(self.wine + ["wineboot"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, env=env, timeout=120)
-        except (OSError, subprocess.TimeoutExpired):
-            pass                          # the tests start the services then, as without a kept server
+        self._warmup()
         return self
 
     def __exit__(self, *exc):
