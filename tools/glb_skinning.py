@@ -144,7 +144,12 @@ def _reject_json_constant(token):
 
 
 def parse_glb(data):
-    """Return ``(gltf, bin_chunk, container)`` for a binary glTF 2.0 container."""
+    """Return the JSON, embedded BIN bytes (if present) and container metadata."""
+    gltf, bin_view, container = _parse_chunks(data)
+    return gltf, bytes(bin_view) if bin_view is not None else None, container
+
+
+def _parse_chunks(data):
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise GlbSkinError("GLB data must be bytes-like")
     raw = bytes(data)
@@ -178,16 +183,15 @@ def parse_glb(data):
             raise GlbSkinError(
                 f"GLB chunk at {offset} declares {chunk_length} bytes, past the end of the file"
             )
-        payload = raw[start:end]
         if chunk_index == 0:
             if chunk_type != CHUNK_TYPE_JSON:
                 raise GlbSkinError(
                     f"first GLB chunk must be JSON (0x{CHUNK_TYPE_JSON:08X}), "
                     f"got 0x{chunk_type:08X}"
                 )
-            json_chunk = payload
+            json_chunk = raw[start:end]
         elif chunk_index == 1 and chunk_type == CHUNK_TYPE_BIN:
-            bin_chunk = payload
+            bin_chunk = memoryview(raw)[start:end]
         else:
             if chunk_type == CHUNK_TYPE_JSON:
                 raise GlbSkinError("repeated JSON chunk in GLB")
@@ -371,12 +375,12 @@ class _Reader:
 
         if self.buffer_limit == 0:
             raise GlbSkinError(f"accessors[{index}] needs buffer 0, but the GLB has no embedded buffer")
-        data = self.bin_chunk[: self.buffer_limit]
+        # The view and accessor bounds above already exclude any BIN alignment padding.
         unpacker = struct.Struct("<" + fmt_char * components)
         base = view_offset + accessor_offset
         values = []
         for i in range(count):
-            values.append(unpacker.unpack_from(data, base + i * stride))
+            values.append(unpacker.unpack_from(self.bin_chunk, base + i * stride))
         meta["buffer_view"] = view_index
         return values, meta
 
@@ -936,7 +940,7 @@ def _validate_primitive(reader, primitive, mesh_index, mesh_name, primitive_inde
 
 def analyze_glb(data):
     """Validate a GLB and return a JSON-serializable report."""
-    gltf, bin_chunk, container = parse_glb(data)
+    gltf, bin_chunk, container = _parse_chunks(data)
     reader = _Reader(gltf, bin_chunk)
     warnings = []
     errors = []

@@ -648,6 +648,35 @@ class GlbSkinningTests(unittest.TestCase):
                 self.assertIn("must not overwrite the input", proc.stderr)
                 self.assertEqual(before, path.read_bytes())
 
+    def test_analysis_does_not_copy_large_unused_payloads(self):
+        doc, binary, _ = glb_skinning.parse_glb(make_glb())
+        size = 4 * 1024 * 1024
+        doc["buffers"][0]["byteLength"] = size - 1
+        raw = build_glb(doc, binary.ljust(size - 1, b"\0"))
+        extension = struct.pack("<II", size, 0x12345678) + bytes(size)
+        raw = raw[:8] + struct.pack("<I", len(raw) + len(extension)) + raw[12:] + extension
+        path = self.write("padded.glb", raw)
+        measure = """
+import sys, tracemalloc
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import glb_skinning
+data = Path(sys.argv[2]).read_bytes()
+tracemalloc.start()
+report = glb_skinning.analyze_glb(data)
+assert report["ok"], report["errors"]
+print(tracemalloc.get_traced_memory()[1])
+"""
+        peak = subprocess.check_output([sys.executable, "-I", "-c", measure, str(TOOLS), str(path)], timeout=60)
+        self.assertLess(int(peak), size, "inspection allocated a full unused payload")
+
+    def test_accessor_cannot_read_the_bin_padding(self):
+        doc = {"buffers": [{"byteLength": 3}],
+               "bufferViews": [{"buffer": 0, "byteLength": 4}],
+               "accessors": [{"bufferView": 0, "componentType": 5121, "count": 1, "type": "VEC4"}]}
+        with self.assertRaisesRegex(glb_skinning.GlbSkinError, "exceeds buffer 0"):
+            glb_skinning._Reader(doc, bytes(4)).read(0, "JOINTS_0")
+
     def test_accessor_byte_stride_and_offset(self):
         joints = ((0, 0, 0, 0), (0, 1, 0, 0), (1, 1, 0, 0))
         weights = ((1.0, 0.0, 0.0, 0.0),
