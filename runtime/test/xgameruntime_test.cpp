@@ -539,7 +539,29 @@ void check_run_time_load() {
                                   unregister_hint(n, late_hint, false) && unregister_port(n, late_port, false);
         while (XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0)) {}
         check(unregistered && late.calls == 0, "a registration ended before its queue is dispatched sends nothing");
-        XTaskQueueCloseHandle(manual);
+        // An initial notification whose callback unregisters itself, waiting, on the callback's own thread (kevincommits'
+        // Finding 19 in #1608, item 5): the wait was for its own return, so it never ended. Dispatched on a thread of
+        // its own so a hang is a failed check, not a stuck test.
+        static void* s_net = nullptr;
+        static Unregister s_unregister = nullptr;
+        static XTaskQueueRegistrationToken s_self{};
+        static bool s_self_result = false;
+        s_net = n;
+        s_unregister = unregister_port;
+        const PortCallback on_port_self = [](void*, uint16_t) { s_self_result = s_unregister(s_net, s_self, true); };
+        const bool self_registered = register_port(n, manual, nullptr, on_port_self, &s_self) == S_OK;
+        HANDLE dispatcher = CreateThread(
+            nullptr, 0,
+            [](void* q) -> DWORD {
+                while (XTaskQueueDispatch(static_cast<XTaskQueueHandle>(q), XTaskQueuePort::Completion, 0)) {}
+                return 0;
+            },
+            manual, 0, nullptr);
+        const bool returned = dispatcher && WaitForSingleObject(dispatcher, 3000) == WAIT_OBJECT_0;
+        check(self_registered && returned && s_self_result,
+              "a callback that unregisters itself with wait=true returns instead of waiting on itself");
+        if (dispatcher) CloseHandle(dispatcher);
+        if (returned) XTaskQueueCloseHandle(manual);
         uint16_t port = 7;
         using QueryPort = HRESULT(STDMETHODCALLTYPE*)(void*, uint16_t*);
         using NotImpl = HRESULT(STDMETHODCALLTYPE*)(void*);
