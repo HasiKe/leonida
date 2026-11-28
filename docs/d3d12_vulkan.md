@@ -2317,7 +2317,9 @@ below 4 GiB). A parameter that does not fit goes, with every later one, to the s
     two dwords from s6). The `pack()` layout contradicts 7 of them, which read the second table at s5, the first
     table's high half in that layout.
 - **Vertex/pixel/geometry s8 and mesh s16: a hypothesis.** It rests on the census above only; no signature
-  confirms these bases, and visibility is not modelled (every parameter takes its place in every stage).
+  confirms these bases, and visibility is not modelled (every parameter takes its place in every stage). Each
+  shader's own root-layout table would make it a per-shader fact; it is parsed but not counted yet ("Per-shader
+  root tables in the FSSM record" below).
 
 The runtime uses the console layout at **both** bind points. Every stage of a pipeline reads one push-constant block
 (`ShaderUserData` in `runtime/src/vulkan_replay.h`), so the graphics bind point lays a signature out once with
@@ -2380,6 +2382,75 @@ block puts the first table, while two dwords per table would put it at s2.
 Still open: which CBV index lands in which pair. The four pairs do appear in declaration order, but nothing in the
 package proves that order, and every parameter in these 29 is `D3D12_SHADER_VISIBILITY_ALL`, so they say nothing
 about the visibility question below.
+
+**Per-shader root tables in the FSSM record (FSSM-ROOT-LAYOUT-TABLES): parsed, not measured yet.** The census
+above reads the code. Each native program's record also names two tables that state the layout directly: a
+root-layout table (where each root parameter arrives in the program's user data) and a used-resource table (which
+descriptors the program reads, by root parameter). This is the record layout as read by VIctory (Marvisak/VIctory,
+GPL-3.0, `native.rs` in its `crates/victory-shader/src`), which builds its user data from these tables instead of
+inferring a base. `root_tables()` in `tools/fssm_root_layout.py` is a parser written for this repository from that
+layout; it contains no VIctory code. **Nothing here has been run on a real shader**: the parser and
+`tools/root_layout_census.py` are tested on hand-built records only (`tests/test_fssm_root_layout.py`). Neither
+file is a translation source and `tools/fssm_unpack.py` is unchanged, so a translated shader library stays valid
+with them.
+
+Offsets stored in the blob count from the payload, which starts at blob offset `0x10`; the offsets other pages
+give for the header (`0xC0`, `0xE8`, ...) are blob offsets.
+
+| Where | What | Basis |
+|---|---|---|
+| payload `+0x08` | `u64` record offset per hardware stage: LS, HS, ES, GS, VS, PS at `+0x08`..`+0x30`, mesh at `+0x48`, compute at `+0x60`; `0xDEADBEEFDEADBEEF` when the blob has no program for the stage | VIctory's reading. [fssm_crosscheck.md](fssm_crosscheck.md) measured blob `0x18`/`0x20` (the LS and HS slots here) as that sentinel in 26,503 of 26,503, and the code offset at blob `0xC0`, where a first record at payload `0xB0` puts it. Which slot holds which record offset is not checked, and the qwords between those slots (`+0x38`, `+0x40`, `+0x50`, `+0x58`) are not read. |
+| record `+0x00`, `+0x08` | `u64` code offset and size | Measured before as blob `0xC0`/`0xC8`. The first instruction is `0x18` bytes into this range (the `u32[0xC0] + 0x28` rule, with the offset counted from the payload). |
+| record `+0x28` | `u64` offset of the root-layout table | VIctory's reading. It is the field fssm_crosscheck.md calls `code_end` (blob `0xE8`): equal to code offset + size in 26,486 blobs, so the table starts where the code ends, and the unset sentinel in the other 17. |
+| record `+0x30` | `u64` offset of the used-resource table | VIctory's reading. The `meta_ptr` of fssm_crosscheck.md (blob `0xF0`), the sentinel in 635 blobs. |
+| record `+0x38`, `+0x3c` | `u32` entry count of each table | VIctory's reading, unconfirmed. |
+| root-layout entry, 20 bytes | `u32` root type (0 constants, 1 root descriptor, 3 descriptor table, 4 immediate sampler, 5 resource heap, 6 sampler heap), `u32` offset of the range in its table in dwords, `u32` user-data dwords it takes, `u32` shader register of the first descriptor, `u8` first user-data dword, `u8` root parameter index, `u16` 0 | VIctory's reading, unconfirmed. `fssm_header.binding_table` already found 20-byte records at this place in all 26,503 blobs (5,640,704 of them) without naming their fields. It starts at the same byte, so its "header" word is this table's first root type: it is 4 in 24,572 blobs and 3 in 1,914, an immediate sampler and a table. Its records begin 8 bytes later, so each straddles two entries. That follows from the two descriptions; it is not checked on data. |
+| used-resource entry, 20 bytes | `u8` resource type (0 SRV, 1 sampler, 2 CBV, 3 UAV), `u8` root type, `u16` 0, `u32` offset in the table in dwords, `u32` lower-bound register, `u32` stride, `u8` dwords per descriptor, `u8` first user-data dword, `u8` root parameter index, `u8` 0 | VIctory's reading, unconfirmed. |
+| user-data dword n → SGPR | `s<n>` in the VS, PS and compute stages; `s<n+8>` in the merged and mesh stages (LS, HS, ES, GS, MS), which have 8 system SGPRs first | VIctory's reading. With it the bases above are first user-data dwords: 8 for a PS, VS or mesh shader (`s8`, `s8`, `s16`), 4 for compute, 0 for a GS (`s8`). Section 7 has the mesh user data at `s16`-`s24` from a corpus measurement. |
+| spill (compute) | 16 user SGPRs; a parameter whose first user-data dword is 16 or more is in memory behind the 40-bit pointer in user data 0-1, and that memory starts with dword 16 | VIctory's reading. The pointer in `s[0:1]` is also section 7's (console-compiler output). The 16 is not measured here: the game's compute shaders launch with at most 14 user SGPRs. VIctory reads a spill for compute only. |
+
+What the parser refuses (`FssmLayoutError`, a `ValueError`): a header that is not version `0x101` with a matching
+payload size, a record or code range outside the payload, records that overlap each other or the slot table, and a
+table that runs past the payload or overlaps a record, its program's code or the program's other table. A count of
+0 is an empty table whatever its offset is. Unnamed types and non-zero reserved fields are kept, so the census can
+count them.
+
+```
+python -I tools/root_layout_census.py <work>/shaders/dxbc --json <report.json>
+python -I tools/root_layout_census.py <work>/shaders/dxbc --base ps=8 vs=8 gs=8 cs=4 ms=16 --expect-agree
+python -I tools/fssm_root_layout.py <work>/shaders/dxbc --out <root_layout.json>
+```
+
+The census reads your own carved containers (every tag-`0x0D` payload) or unpacked `.fssm` blobs and prints counts
+only, per hardware stage: the lowest SGPR a parameter arrives in and the lowest that holds an address (the number
+the SGPR census above measured from the code), the dwords each root type takes (one or two per table), the root
+types and used-resource kinds, the compute programs with a spilled parameter and the first spilled dword, and how
+many programs agree with this section's hypothesis: no parameter below the stage base, one dword per table, two per
+root descriptor, parameters in root order. It lists the reasons for the ones that disagree. `--expect-agree` exits
+1 on a disagreement, a blob that does not parse or an empty run. It also counts what would show the reading to be
+wrong: blobs it cannot read (by reason), record offsets (the first is expected at `0xc0`), whether the root-layout
+table follows the code, the number of entries in each table, used resources with no layout entry for their
+parameter, non-zero reserved fields, unnamed types and parameters past `s31`. With no path, or a folder that has
+no `.fssm` or `.dxbc` file, it prints `no input`. `fssm_root_layout.py` writes the tables themselves as JSON, one
+line per file with an entry per blob (the programs, or why they could not be read); without `--out` it prints
+them, and for a whole library the output is large.
+
+Open:
+- **Every offset and field marked "VIctory's reading" is unconfirmed on this corpus.** A census of a real library
+  settles it: no unread blob, record offsets as expected, a lowest-pointer SGPR per stage that matches the SGPR
+  census (`s8` in 9,830 PS and 1,660 VS, `s4` in 2,364 CS, `s16` in 7,977 MS), and entry totals that can be held
+  against the 5,640,704 records `binding_table` counted in the same region.
+- **Does a table list every parameter of the root signature, or only the ones the program reads?** If only those,
+  a lowest parameter above the base is expected; if all of them, it contradicts the base. The census therefore
+  counts "above the base" apart from "at the base" and calls neither a disagreement.
+- **Root type 2 and the reserved fields** have no reading; the census counts them.
+- **Blobs with two programs.** The 195 GS blobs carry a second PAL stage descriptor, the shader's VS copy
+  ([design.md](design.md), "PAL stage descriptors"), so they should have two records here. Whether each has its
+  own tables is not known: the parser reads each record's tables on their own and lets two records name the same
+  table.
+- **A graphics-stage spill** has no reading at all.
+- **The runtime does not use the tables.** Feeding them to `rt::rootsig::pack_stage` and `ShaderUserData` is the
+  follow-up once the counts are in; until then the hypothesis above stays a hypothesis.
 
 Spill policy: a signature needing more than 32 user SGPRs, or more than the 64-dword D3D12 cost limit, is
 refused loudly (`pack` returns the offending parameter) instead of being truncated. The console spills through

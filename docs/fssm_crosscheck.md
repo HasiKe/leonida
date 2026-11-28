@@ -240,7 +240,12 @@ PR description.
 - The vendor disassembler's `asic(CI)` label is unexplained; it does not override the
   gfx1013 decode result.
 - The post-`code_end` binding table is parsed, but the meaning of its five words and the bytes
-  after the name are not established.
+  after the name are not established. VIctory (Marvisak/VIctory) reads the same region as two
+  tables of 20-byte entries, a root-layout table and a used-resource table, which the record
+  names at `0xE8` and `0xF0` with their entry counts at `0xF8` and `0xFC`; in that reading
+  `code_end` and `meta_ptr` are the two table offsets, counted from `0x10`.
+  `tools/fssm_root_layout.py` parses that reading. It is not confirmed on this corpus yet
+  ([d3d12_vulkan.md](d3d12_vulkan.md), section 3.5, "Per-shader root tables in the FSSM record").
 - The negative prior-art claim (`FSSM`/`0x101`/`0xDEADBEEF` have no public prior art) was
   not re-run; it is a web-search result, not a format fact.
 
