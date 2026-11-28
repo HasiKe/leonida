@@ -3156,9 +3156,11 @@ def main() -> int:
                          "without VK_EXT_mesh_shader; on by itself on Intel's Windows Vulkan driver, whose mesh "
                          "draws crash on the corpus' mesh shaders (BUILD-2202)")
     ap.add_argument("--mesh-serial-waves", action="store_true",
-                    help="with wave64 emulation, run the waves of a mesh shader of more than 64 threads one after "
-                         "the other in 64 invocations (the translator's --mesh-serial-waves, #2435); off by "
-                         "default, no effect on shaders translated natively or with --mesh-compute")
+                    help="with wave64 emulation, run the waves of a mesh shader one after the other in 64 "
+                         "invocations instead of side by side (the translator's --mesh-serial-waves, #2435). "
+                         "Only wave64 mesh shaders of more than 64 threads, a multiple of 64, with no LDS "
+                         "instruction, store or atomic take that form; the others, and every shader translated "
+                         "natively or with --mesh-compute, come out as before. Off by default")
     ap.add_argument("--native-mesh", action="store_true",
                     help="keep native mesh shaders on Intel's Windows Vulkan driver instead of turning on "
                          "--mesh-compute (for a driver that fixes BUILD-2202's crash)")
