@@ -8227,6 +8227,8 @@ class Gen:
             self.emit(f"{first} = OpSelect %uint {any_} {lsb} {self.cu(0)}")
             self.emit(f"{r} = OpGroupNonUniformShuffle %uint {self.cu(3)} {v} {first}")
             self.dst(a[0], r)
+        elif op in ("image_gather4_c_lz", "image_gather4_c_lz_o"):
+            self.image_op(op, a, mods)
         elif op in ("image_sample_o", "image_sample_lz_o", "image_sample_l_o", "image_sample_b_o",
                     "image_sample_c_lz_o", "image_sample_c_o", "image_sample_c_b_o", "image_sample_cl_o", "image_sample_b_cl_o",
                     "image_sample_c_cl_o", "image_sample_c_b_cl_o") or                 op in ("image_sample", "image_sample_lz", "image_sample_l", "image_sample_b", "image_sample_c_lz",
@@ -13657,6 +13659,54 @@ class Gen:
         self.emit(f"{res} = OpSelect %float {passed} %f1 %f0")
         return res
 
+    def emit_gather4_c_lz(self, op, mods, dim, si, coords, f, ncoord, is3d, dmask, vdata, d16):
+        """image_gather4_c_lz[_o]: the depth-compare gather at the base level, as OpImageDrefGather (docs/design.md,
+        "image_gather4_c_lz"). Address order after the optional offset dword: z-compare, s, t, [slice] (GFX10 MIMG:
+        offset, bias, zcompare, derivatives, coordinates, LOD; there is no LOD here). The four results are the four
+        comparisons in gather order, the compare function comes from the sampler as for image_sample_c_lz.
+        Sources agree (docs/design.md): LLVM's AMDGPUSampleVariant address order and llvm-mc's dword counts; Mesa ACO's
+        visit_tex selects exactly these two opcodes for a shadow tg4 at level zero, pushes offset, compare, coordinates,
+        keeps the compare whole under a16, and sets dmask 1 for every shadow gather (hence the dmask refusal)."""
+        if is3d or dim not in ("dim:SQ_RSRC_IMG_2D", "dim:SQ_RSRC_IMG_2D_ARRAY", "dim:SQ_RSRC_IMG_CUBE"):
+            raise Unsupported(op + " " + dim.split("SQ_RSRC_IMG_")[-1])
+        if dmask != 1:
+            # A Dref gather compares the depth channel only; another component mask would need the view's swizzle.
+            raise Unsupported(op + " dmask other than 0x1")
+        if any(m not in (dim, "dmask:0x1", "dmask:1", "a16", "d16") for m in mods):
+            raise Unsupported(op + " modifier (only dim, dmask:0x1, a16 and d16 are translated)")
+        offset = ""
+        if op.endswith("_o"):
+            # first address dword: signed 6-bit texel offsets x [5:0], y [13:8], as for image_gather4_lz_o
+            parts = []
+            for k in range(2):
+                u, i = self.tmp(), self.tmp()
+                self.emit(f"{u} = OpBitFieldSExtract %uint {coords[0]} {self.cu(8 * k)} {self.cu(6)}")
+                self.emit(f"{i} = OpBitcast %int {u}")
+                parts.append(i)
+            goff = self.tmp()
+            self.emit(f"{goff} = OpCompositeConstruct %v2int {parts[0]} {parts[1]}")
+            f = f[1:]
+            offset = f" Offset {goff}"
+            self.uses_img_offset = True
+        if len(f) < 1 + ncoord:
+            raise Unsupported(op + " coords")
+        ref, f = f[0], f[1:]
+        if dim == "dim:SQ_RSRC_IMG_CUBE":
+            f = self.cube_coords(f)
+        uv = self.tmp()
+        if ncoord == 3:          # 2D array (or cube as a 6-layer array): the layer is the third coordinate
+            self.emit(f"{uv} = OpCompositeConstruct %v3float {f[0]} {f[1]} {f[2]}")
+        else:
+            self.emit(f"{uv} = OpCompositeConstruct %v2float {f[0]} {f[1]}")
+        res = self.tmp()
+        self.emit(f"{res} = OpImageDrefGather %v4float {si} {uv} {ref}{offset}")
+        taps = []
+        for c in range(4):
+            tap = self.tmp()
+            self.emit(f"{tap} = OpCompositeExtract %float {res} {c}")
+            taps.append(tap)
+        self.store_gather_taps(vdata["r"], taps, d16)
+
     def emit_gather4_lod(self, op, a, mods, dim, img, img_idx, si, coords, f, ncoord, is3d, dmask, vdata, a16, d16):
         """Translate image_gather4_{c_l,cl,c_cl,b,b_cl,c_b,c_b_cl}[_o] via 2x2 OpImageFetch footprint.
         Address order: [offset (_o)], [bias (_b)], [z_compare (_c)], s, t, [slice (2D_ARRAY)], [lod (_l) | clamp (_cl)]."""
@@ -14151,6 +14201,9 @@ class Gen:
             f = [self.tof(c) for c in coords]
             if op in self.GATHER4_LOD_OPS:
                 self.emit_gather4_lod(op, a, mods, dim, img, img_idx, si, coords, f, ncoord, is3d, dmask, vdata, a16, d16)
+                return
+            if op in ("image_gather4_c_lz", "image_gather4_c_lz_o"):
+                self.emit_gather4_c_lz(op, mods, dim, si, coords, f, ncoord, is3d, dmask, vdata, d16)
                 return
             goff = None
             if op in ("image_gather4_lz_o", "image_gather4_l_o"):
