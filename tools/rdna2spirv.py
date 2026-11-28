@@ -7255,9 +7255,12 @@ class Gen:
         return v
 
     def clamp_mods_f64(self, v, mods):
-        """clamp_mods for a %double result (VOP3 f64 arithmetic): omod scales first, then clamp to [0, 1]. As
-        for f32 the clamp is GLSL.std.450 FClamp, so a NaN result and the sign of a -0 result are left to the
-        driver (the hardware, with DX10_CLAMP set, gives +0 for NaN)."""
+        """clamp_mods for a %double result: omod scales first, then clamp to [0, 1]. As for f32 the clamp is
+        GLSL.std.450 FClamp, so a NaN result and the sign of a -0 result are left to the driver (the hardware,
+        with DX10_CLAMP set, gives +0 for NaN). The f64 VALU arithmetic and rounding ops hand this only `clamp`:
+        on RDNA2 the omod of those ops does nothing while f64 denormals are kept, the MODE this translator
+        assumes, as the "v_add_f64 output modifiers" row records. A caller whose own row measured an omod keeps
+        passing it."""
         for m in mods:
             if m in ("mul:2", "mul:4", "div:2"):
                 g = self.tmp()
@@ -9029,11 +9032,14 @@ class Gen:
             special_high = emit_u(f"OpSelect %uint {is_nan} {high} {subnormal_high}")
             out = [emit_u(f"OpSelect %uint {special} {special_low} {rounded[0]}"),
                    emit_u(f"OpSelect %uint {special} {special_high} {rounded[1]}")]
-            if mods:
-                # The output modifiers work on the double: the same scale/clamp path as before, on the selected value.
+            # Only clamp: measured on the same gfx1036 part, mul:2/mul:4/div:2 on these four do nothing while
+            # f64 denormals are kept, and clamp applies (v_trunc/ceil/rndne_f64 -> 1.0 and -> 0.0).
+            clamp_only = [m for m in mods if m == "clamp"]
+            if clamp_only:
+                # The clamp works on the double: the same path as before, on the selected value.
                 chosen_pair = emit_u(f"OpCompositeConstruct %v2uint_d {out[0]} {out[1]}")
                 chosen = emit_u(f"OpBitcast %double {chosen_pair}")
-                modified = emit_u(f"OpBitcast %v2uint_d {self.clamp_mods_f64(chosen, mods)}")
+                modified = emit_u(f"OpBitcast %v2uint_d {self.clamp_mods_f64(chosen, clamp_only)}")
                 out = [emit_u(f"OpCompositeExtract %uint {modified} {index}") for index in range(2)]
             for index in range(2):
                 self.dst({"k": "vgpr", "r": dst["r"] + index, "n": 1}, out[index])
@@ -9065,7 +9071,8 @@ class Gen:
                     r = self.tmp()
                     self.emit(f"{r} = OpFAdd %double {x} {y}")
                     if self.round_mode:
-                        # MODE rounds the sum itself; clamp/omod then apply to the rounded value, as on the hardware.
+                        # MODE rounds the sum itself; the mods are applied to the rounded value at the shared site
+                        # below, which passes only `clamp`.
                         m2, mlo, mhi, n2, rd = (self.tmp() for _ in range(5))
                         self.emit(f"{m2} = OpBitcast %v2uint_d {r}")
                         self.emit(f"{mlo} = OpCompositeExtract %uint {m2} 0")
@@ -9086,8 +9093,14 @@ class Gen:
                     x = f64(a[1])
                     r = self.tmp()
                     self.emit(f"{r} = OpExtInst %double %glsl Sqrt {x}")
-                # VOP3 f64 ops carry HasClamp and HasOMod (LLVM VOPProfile, f64 is a modifier type).
-                self.dst_f64(a[0], r, mods, op)
+                # VOP3 f64 ops carry HasClamp and HasOMod (LLVM VOPProfile, f64 is a modifier type). The omod is
+                # dropped here because RDNA2 ignores it: measured with tools/hw_oracle raw wave32 and wave64
+                # kernels on a gfx1036 iGPU, mul:2/mul:4/div:2 of v_add_f64, v_rcp_f64, v_rsq_f64 and v_sqrt_f64
+                # apply only with MODE.IEEE off and f64 denormals flushed, and never while denormals are kept
+                # (IEEE on or off); clamp applies in every one of those runs. Same for the four rounding ops
+                # above. The measurements are written up in the "v_add_f64 output modifiers" row of docs/design.md;
+                # this is SHADER-721, the binary64 counterpart of the f16 #1970.
+                self.dst_f64(a[0], r, [m for m in mods if m == "clamp"], op)
         elif op in ("v_cmp_class_f64", "v_cmpx_class_f64"):
             self.cmp_class_f64(op, a, exec_only=op == "v_cmpx_class_f64", mods=mods)
         elif op in ("image_bvh_intersect_ray", "image_bvh64_intersect_ray"):
