@@ -37,8 +37,8 @@ vk_pipeline_check (a checker already on disk is enough only when runtime is not 
 the rest of assets. When shaders and assets share the machine, --jobs is split between them and passed to
 rpf9dump; a solo assets run still lets rpf9dump use every core.
 
-Long steps log percent and a rough ETA (shader translation shards, asset exports, XMA decode, and overall
-weighted stage completion while they overlap).
+Long steps log percent and a rough ETA (shader translation shards, asset exports, XMA decode, pipeline batches
+weighted by module size, and overall weighted stage completion while they overlap).
 
 On an interactive terminal, a LEONIDA setup screen asks for --jobs and whether to overlap stages, then a
 key-switchable per-stage log view (1-4 / Tab) keeps parallel output demuxed; full logs land in <work>/logs/.
@@ -2901,6 +2901,8 @@ def pipelines(work: str, out: str, jobs: "int | None" = None, *, runtime_build: 
     code = 0
     ranges = [(s, min(PIPELINE_BATCH_SIZE, len(names) - s))
               for s in range(0, len(names), PIPELINE_BATCH_SIZE)] if names else [(0, None)]
+    costs = pipeline_costs(spirv, names)
+    total_cost, done_cost, t0 = sum(costs), 0.0, time.monotonic()
     for start, count in ranges:
         if count is not None:
             log(f"pipelines: checking shaders {start + 1}-{start + count} of {len(names)} in a fresh process")
@@ -2909,6 +2911,9 @@ def pipelines(work: str, out: str, jobs: "int | None" = None, *, runtime_build: 
             code = result   # a later successful batch must not erase an earlier validation failure
         if result == 2 or interrupted(result):
             break
+        if count is not None and total_cost > 0:
+            done_cost += sum(costs[start:start + count])
+            log(pipelines_progress(start + count, len(names), done_cost / total_cost, time.monotonic() - t0))
     if crashed and not code:
         code = 1
     report_written = bool(crashed) and record_crashes(out, spirv, crashed)
@@ -2948,6 +2953,35 @@ def record_crashes(out: str, spirv: str, crashed: "list[str]") -> bool:
 # 10 minutes since the last cache checkpoint, plus loading the cache). Looked up when pipelines() runs.
 PIPELINE_CRASH_RETRIES = 5
 PIPELINE_BATCH_SIZE = 500   # fresh compiler process and cache checkpoint after at most this many index entries
+# A module's share of the stage's time is taken as its SPIR-V size in MB to this power: a large module compiles
+# disproportionately slower. On one full-corpus run (RTX 5070 Ti, driver 621.24, wave64-emulated translation; 41
+# batches of 500 taking 16 s to 26 min, 2.8 h in all) the batch times ranked with their bytes at Spearman 0.93, and
+# the time left after 5 to 38 batches was 55-85% under the actual by batch count, 33-50% under by bytes, 6-25%
+# under with 1.5, and 3-41% over with 2.
+PIPELINE_COST_EXPONENT = 1.5
+
+
+def pipeline_costs(spirv: str, names: "list[str]") -> "list[float]":
+    """The estimated compile cost of each module, in index order (0 for a module without its .spv): only for the
+    percent and time left the pipelines stage logs, never to choose what runs."""
+    costs = []
+    for name in names:
+        try:
+            size = os.path.getsize(os.path.join(spirv, name + ".spv"))
+        except OSError:
+            size = 0
+        costs.append((size / 1e6) ** PIPELINE_COST_EXPONENT)
+    return costs
+
+
+def pipelines_progress(done: int, total: int, share: float, elapsed: float) -> str:
+    """The line after each batch: shaders checked, the share of the estimated compile cost behind them, and the time
+    left at the pace so far (the elapsed time once the last batch is done)."""
+    pct = min(100, int(100 * share))
+    if share >= 1 or done >= total:
+        return f"pipelines: {done}/{total} shaders checked, {fmt_duration(elapsed)} elapsed"
+    left = f", ~{fmt_duration(elapsed * (1 - share) / share)} left" if share > 0 else ""
+    return f"pipelines: {done}/{total} shaders checked, {pct}% of the estimated compile time{left}"
 
 
 def interrupted(code: int) -> bool:
