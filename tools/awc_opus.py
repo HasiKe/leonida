@@ -34,6 +34,7 @@ import argparse
 import functools
 import json
 from collections import Counter
+from collections.abc import Iterable
 import os
 import struct
 import sys
@@ -123,30 +124,30 @@ def write_ogg_opus(path: str, packets: list, channels: int, serial: int, length:
         pre_skip = total          # a granule below the pre-skip makes the stream undecodable
     head = b"OpusHead" + struct.pack("<BBHIhB", 1, channels, pre_skip, 48000, 0, 0)
     tags = b"OpusTags" + struct.pack("<I", 8) + b"leonida " + struct.pack("<I", 0)
-    out = [ogg_page(serial, 0, 0, [head], 0x02), ogg_page(serial, 1, 0, [tags], 0x00)]
-    seq, granule, pending, size = 2, 0, [], 0
     target = pre_skip + length if length > 0 else None
-    written = 0
-    if not packets:
-        out.append(ogg_page(serial, 2, pre_skip, [], 0x04))
-        write_file(path, b"".join(out))
-        return pre_skip
-    for i, p in enumerate(packets):
-        pending.append(p)
-        granule += opus_samples(p)
-        size += len(p)
-        reach = target is not None and granule >= target
-        last = i == len(packets) - 1
-        if reach or size > 4000 or len(pending) >= 50 or last:
-            g = target if reach else granule
-            out.append(ogg_page(serial, seq, g, pending, 0x04 if (reach or last) else 0x00))
-            written = g
-            seq += 1
-            pending, size = [], 0
-            if reach or last:
-                break
-    write_file(path, b"".join(out))
-    return written
+
+    def pages():
+        yield ogg_page(serial, 0, 0, [head], 0x02)
+        yield ogg_page(serial, 1, 0, [tags], 0x00)
+        if not packets:
+            yield ogg_page(serial, 2, pre_skip, [], 0x04)
+            return
+        seq, granule, pending, size = 2, 0, [], 0
+        for i, p in enumerate(packets):
+            pending.append(p)
+            granule += opus_samples(p)
+            size += len(p)
+            reach = target is not None and granule >= target
+            last = reach or i == len(packets) - 1
+            if size > 4000 or len(pending) >= 50 or last:
+                yield ogg_page(serial, seq, target if reach else granule, pending, 0x04 if last else 0x00)
+                if last:
+                    return
+                seq += 1
+                pending, size = [], 0
+
+    _write_file_parts(path, pages())
+    return min(total, target) if target is not None else total
 
 
 @functools.cache
@@ -159,7 +160,7 @@ def write_file(path: str, data: bytes) -> None:
     _write_file_parts(path, (data,))
 
 
-def _write_file_parts(path: str, parts: tuple[bytes | memoryview, ...]) -> None:
+def _write_file_parts(path: str, parts: Iterable[bytes | memoryview]) -> None:
     """Write under a private temporary name and rename into place: a stopped run or a full disk never leaves a
     short file under the final name, where a later run would keep it. The staging file is created in the
     destination directory (the same volume), so concurrent writers each publish a complete file (last wins)
