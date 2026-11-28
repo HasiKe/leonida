@@ -145,7 +145,7 @@ PRIMARY.update({
     0xCA: ("retf", "invalid"), 0xCB: ("retf", "invalid"),
     0xCC: ("int3", ""), 0xCD: ("int", "Ib"), 0xCE: ("into", "invalid"), 0xCF: ("iret", ""),
     0xD0: ("grp2", "Eb 1"), 0xD1: ("grp2", "Ev 1"), 0xD2: ("grp2", "Eb c"), 0xD3: ("grp2", "Ev c"),
-    0xD4: ("aam", "invalid"), 0xD5: ("aad", "invalid"), 0xD6: ("salc", "invalid"), 0xD7: ("xlat", "sys"),
+    0xD4: ("aam", "invalid"), 0xD5: ("aad", "invalid"), 0xD6: ("salc", "invalid"), 0xD7: ("xlat", ""),
     0xE0: ("loopne", "Jb"), 0xE1: ("loope", "Jb"), 0xE2: ("loop", "Jb"), 0xE3: ("jcxz", "Jb"),
     0xE4: ("in", "sys"), 0xE5: ("in", "sys"), 0xE6: ("out", "sys"), 0xE7: ("out", "sys"),
     0xE8: ("call", "Jz"), 0xE9: ("jmp", "Jz"), 0xEA: ("jmpf", "invalid"), 0xEB: ("jmp", "Jb"),
@@ -492,6 +492,8 @@ def _classify(ins, mnem, cc_index, state):
         ins.kind = "nop"
         if mnem == "nop" and ins.rep == "f3":
             ins.mnem = "pause"
+    elif mnem in ("xlat", "enter"):
+        ins.kind = "misc"
     elif mnem in ("clc", "stc", "cmc"):
         ins.kind = "alu"
         ins.flags_w = "C"
@@ -1479,6 +1481,41 @@ class FunctionTranslator:
 
     def _op_size(self, op):
         return op[1]["size"] if op[0] == "m" else op[2]
+
+    def _emit_xlat(self, ins):
+        """Emit xlat/xlatb (0xD7): AL := byte ptr [RBX/EBX + zero_extend(AL)], no flags."""
+        a = self.asm
+        a.uxtb(T0, GMAP[0])
+        a.add_r(ADDR_T, GMAP[3], T0, sf=0 if ins.addrsize else 1)
+        a.ldr(T0, ADDR_T, 0, size=1)
+        a.bfi(GMAP[0], T0, 0, 8)
+
+    def _emit_enter(self, ins):
+        """Emit enter imm16, imm8 (0xC8): create nested stack frame, no flags."""
+        a = self.asm
+        alloc = ins.ops[0][1] & 0xFFFF
+        nesting = ins.ops[1][1] & 0x1F
+        rsp, rbp = GMAP[4], GMAP[5]
+        a.str_pre(rbp, rsp, -8)
+        a.mov(T0, rsp)
+        if nesting > 0:
+            if nesting > 1:
+                a.movz(T1, nesting - 1, 0, sf=0)
+                loop_lbl = self._skip_lbl()
+                a.label(loop_lbl)
+                a.sub(rbp, rbp, 8)
+                a.ldr(T2, rbp, 0, size=8)
+                a.str_pre(T2, rsp, -8)
+                a.sub(T1, T1, 1, sf=0)
+                a.cbnz(T1, loop_lbl, sf=0)
+            a.str_pre(T0, rsp, -8)
+        a.mov(rbp, T0)
+        if alloc:
+            if alloc < 4096:
+                a.sub(rsp, rsp, alloc)
+            else:
+                a.li(T1, alloc)
+                a.sub_r(rsp, rsp, T1)
 
     def _load(self, ins, op, dst, as_size=None):
         a = self.asm
@@ -2819,6 +2856,10 @@ class FunctionTranslator:
             raise UnhandledInsn(ins, "std/DF=1")
         elif k == "nop":
             pass
+        elif m == "xlat":
+            self._emit_xlat(ins)
+        elif m == "enter":
+            self._emit_enter(ins)
         else:
             raise UnhandledInsn(ins, f"kind {k}")
 
