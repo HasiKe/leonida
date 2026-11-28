@@ -349,6 +349,7 @@ using HintChangedCallback = void(CALLBACK*)(void* context, const ConnectivityHin
 struct NetRegistration {
     bool running = false;
     bool unregistered = false;
+    DWORD thread = 0;  // the thread running its callback: an unregister from inside it must not wait on itself
 };
 std::mutex g_net_mu;
 std::condition_variable g_net_cv;
@@ -378,13 +379,18 @@ template <class Callback> struct InitialNotification {
             const auto it = g_net_registrations.find(n->token);
             if (canceled || it == g_net_registrations.end()) return;
             it->second.running = true;
+            it->second.thread = GetCurrentThreadId();
         }
         notify(n->callback, n->context);
         {
             std::lock_guard lock(g_net_mu);
             const auto it = g_net_registrations.find(n->token);
-            if (it->second.unregistered) g_net_registrations.erase(it);
-            else it->second.running = false;
+            if (it->second.unregistered) {
+                g_net_registrations.erase(it);
+            } else {
+                it->second.running = false;
+                it->second.thread = 0;
+            }
         }
         g_net_cv.notify_all();
     }
@@ -406,9 +412,10 @@ HRESULT STDMETHODCALLTYPE net_register(void*, XTaskQueueHandle queue, void* cont
         g_net_registrations.emplace(id, NetRegistration{});
     }
     token->token = id;
-    auto* initial = new InitialNotification<Callback>{id, context, callback};
-    const HRESULT hr = XTaskQueueSubmitCallback(queue, XTaskQueuePort::Completion, initial,
-                                                &InitialNotification<Callback>::run);
+    auto* initial = new (std::nothrow) InitialNotification<Callback>{id, context, callback};  // nothing may unwind
+    const HRESULT hr = initial ? XTaskQueueSubmitCallback(queue, XTaskQueuePort::Completion, initial,
+                                                          &InitialNotification<Callback>::run)
+                               : E_OUTOFMEMORY;
     if (process_queue) XTaskQueueCloseHandle(process_queue);
     if (FAILED(hr)) {
         delete initial;
@@ -427,6 +434,9 @@ bool STDMETHODCALLTYPE net_unregister(void*, XTaskQueueRegistrationToken token, 
         return true;
     }
     it->second.unregistered = true;
+    // From inside its own callback: the registration ends when the callback returns, which waiting here would never
+    // let happen. As a wait would, report it done.
+    if (it->second.thread == GetCurrentThreadId()) return true;
     if (wait) g_net_cv.wait(lock, [&] { return !g_net_registrations.contains(token.token); });
     return wait;
 }
