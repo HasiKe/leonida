@@ -266,6 +266,15 @@ class TestFolder(unittest.TestCase):
         self.assertEqual(self.tags("story", "bank_01", stem + ".ogg"), self.tags("story", "bank_01", "0ABCDEF1.ogg"))
         self.assertIn("TITLE=heistau_abcd_01", self.tags("story", "bank_01", stem + ".ogg"))
 
+    def test_single_bank_root_uses_qualified_label(self):
+        bank = Path(self.opus, "story", "bank_02")
+        names = {"story/bank_02.awc": {0x1FFFFFFF: "qualified"},
+                 "bank_02": {0x1FFFFFFF: "wrong"}}
+        stats = T.tag_folder(bank, names)
+        self.assertEqual(stats.get("tagged", 0), 1)
+        self.assertEqual(self.tags("story", "bank_02", "1FFFFFFF.ogg"), ["TITLE=qualified"])
+        self.assertEqual(self.tags("story", "bank_01", "0ABCDEF1.ogg"), [])
+
     def test_second_run_replaces_its_own_tags(self):
         names, ambiguous = T.load_names(self.names, "story")
         T.tag_folder(self.opus, names, ambiguous=ambiguous)

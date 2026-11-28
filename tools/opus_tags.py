@@ -236,7 +236,8 @@ def tag_folder(root, names, dialogue=None, langs=(), dry_run=False, ambiguous=No
                 continue
             stats["ogg files"] += 1
             if streams is None:
-                label = bank_label(names, rel) if rel != "." else None
+                bank_path = os.path.abspath(root).replace(os.sep, "/") if rel == "." else rel
+                label = bank_label(names, bank_path)
                 streams = names[label] if label is not None else {}
             sid = int(m.group(1), 16) & 0x1FFFFFFF
             if sid in ambiguous.get(label, ()):
