@@ -419,15 +419,17 @@ def opus_packet_ranges(d: bytes, at: int, size: int):
             p += 2 + n
 
 
+def next_export_stem(sid, seen):
+    seen[sid] += 1
+    return f"{sid:08X}" if seen[sid] == 1 else f"{sid:08X}~{seen[sid]}"
+
+
 def export_stems(ids):
     """The file stem for each stream, in stream-table order: `<id>` (8 hex digits) for the first stream with an
     id and `<id>~2`, `<id>~3`, ... for later ones. A bank can hold two streams with the same 29-bit id; naming
     them apart keeps the second from overwriting the first. awc_manifest notes the same stems."""
-    seen, out = {}, []
-    for sid in ids:
-        seen[sid] = seen.get(sid, 0) + 1
-        out.append(f"{sid:08X}" if seen[sid] == 1 else f"{sid:08X}~{seen[sid]}")
-    return out
+    seen = Counter()
+    return [next_export_stem(sid, seen) for sid in ids]
 
 
 def bank_output_dir(path, out_dir):
@@ -479,14 +481,17 @@ def export_bank(path: str, out_dir: str, pre_skip: int = OPUS_PRE_SKIP, cue_shee
     os.makedirs(od, exist_ok=True)
     counts = {"opus": 0, "pcm": 0, "other": 0, "music": 0}
     channel_counts = Counter()
+    # Keep existing standalone stream names, even though music is written first.
+    used_stems = Counter(s["id"] for s in streams)
     frame_limits = {}
     for mus, data in music:
         for cid, samples, rate, codec, pk, packet_channels in music_channels(d, mus, data):
+            stem = next_export_stem(cid, used_stems)
             if cue_sheet:
                 channel_counts[cid] += 1
             if pk:
                 n48 = samples * 48000 // rate if rate else 0
-                granule = write_ogg_opus(os.path.join(od, f"{cid:08X}.ogg"), pk, packet_channels, cid, n48,
+                granule = write_ogg_opus(os.path.join(od, stem + ".ogg"), pk, packet_channels, cid, n48,
                                          pre_skip=pre_skip)
                 if cue_sheet and rate == 48000 and samples > 0:
                     frame_limits[cid] = min(samples, max(0, granule - pre_skip))
